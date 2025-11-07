@@ -1,7 +1,8 @@
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from app.utils import s3_utils
-from app.models.schemas import UploadRequest, EmailRequest, FileRequest
+from app.utils import prescription_utils
+from app.models.schemas import UploadRequest, EmailRequest, FileRequest, PrescriptionRequest
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -74,4 +75,41 @@ async def delete_file(body: FileRequest):
         )
     except Exception as e:
         logger.exception("Deletion failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/generate-prescription")
+async def generate_prescription(body: PrescriptionRequest):
+    """
+    Generate a prescription based on medical documents stored in medilocker.
+    Can optionally specify specific files or use all files for the user.
+    """
+    try:
+        # Extract text from documents
+        logger.info(f"Extracting text from documents for {body.email}")
+        document_text = prescription_utils.download_and_extract_documents(
+            body.email, 
+            body.filenames
+        )
+        
+        # Generate prescription using ChatGPT
+        logger.info(f"Generating prescription for {body.email}")
+        prescription = prescription_utils.generate_prescription(
+            document_text,
+            body.patient_symptoms
+        )
+        
+        return JSONResponse(
+            content={
+                "prescription": prescription,
+                "message": "Prescription generated successfully"
+            },
+            headers={
+                "Access-Control-Allow-Origin": "https://kokoro.doctor",
+                "Access-Control-Allow-Credentials": "true"
+            }
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Prescription generation failed")
         raise HTTPException(status_code=500, detail=str(e))
