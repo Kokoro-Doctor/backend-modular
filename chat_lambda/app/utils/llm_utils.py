@@ -1,36 +1,13 @@
-from typing import Generator, Iterable
-
-from fastapi import HTTPException
 from openai import OpenAI
-
+from fastapi import HTTPException
 from app.config import OPENAI_API_KEY
 from app.logger import logger
 
-
-def _build_prompt(history: Iterable[str], user_question: str, language: str = "en") -> str:
+def call_llm_api(history, user_question, language="en"):
     context = "\n".join(history) if history else "No prior messages."
 
-    heart_keywords = [
-        "heart",
-        "bp",
-        "blood pressure",
-        "cardio",
-        "cholesterol",
-        "pulse",
-        "ecg",
-        "angina",
-        "palpitation",
-    ]
-    reproductive_keywords = [
-        "period",
-        "pregnancy",
-        "fertility",
-        "sex",
-        "menstruation",
-        "ovulation",
-        "contraceptive",
-        "hormone",
-    ]
+    heart_keywords = ["heart", "bp", "blood pressure", "cardio", "cholesterol", "pulse", "ecg", "angina", "palpitation"]
+    reproductive_keywords = ["period", "pregnancy", "fertility", "sex", "menstruation", "ovulation", "contraceptive", "hormone"]
 
     q_lower = user_question.lower()
     if any(k in q_lower for k in heart_keywords):
@@ -40,6 +17,7 @@ def _build_prompt(history: Iterable[str], user_question: str, language: str = "e
     else:
         detected_intent = "General / Other"
 
+    # --- Prompt ---
     prompt = f"""
         You are a friendly, caring, and empathetic AI health companion developed by Metafied.
         Your mission is to provide compassionate and accurate guidance related to **heart health** and **reproductive health**.
@@ -67,66 +45,25 @@ def _build_prompt(history: Iterable[str], user_question: str, language: str = "e
 
         AI Response ({language}):
         """
-    return prompt
 
-
-def _get_openai_client() -> OpenAI:
-    if not OPENAI_API_KEY:
-        logger.error("OPENAI_API_KEY is not set")
-        raise HTTPException(status_code=500, detail="OpenAI API key not configured")
-    return OpenAI(api_key=OPENAI_API_KEY)
-
-
-def call_llm_api(history, user_question, language="en"):
-    prompt = _build_prompt(history, user_question, language)
 
     try:
-        client = _get_openai_client()
+        if not OPENAI_API_KEY:
+            logger.error("OPENAI_API_KEY is not set")
+            raise HTTPException(status_code=500, detail="OpenAI API key not configured")
+        
+        client = OpenAI(api_key=OPENAI_API_KEY)
+        
         response = client.chat.completions.create(
             model="gpt-3.5-turbo",
             messages=[
-                {
-                    "role": "system",
-                    "content": "You are a friendly, caring, and empathetic AI health companion developed by Metafied. Your mission is to provide compassionate and accurate guidance related to heart health and reproductive health.",
-                },
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": "You are a friendly, caring, and empathetic AI health companion developed by Metafied. Your mission is to provide compassionate and accurate guidance related to heart health and reproductive health."},
+                {"role": "user", "content": prompt}
             ],
             temperature=0.7,
         )
-
+        
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"OpenAI API error: {e}", exc_info=True)
-        raise HTTPException(status_code=503, detail="LLM request failed")
-
-
-def call_llm_api_stream(history, user_question, language="en") -> Generator[str, None, None]:
-    prompt = _build_prompt(history, user_question, language)
-
-    try:
-        client = _get_openai_client()
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a friendly, caring, and empathetic AI health companion developed by Metafied. Your mission is to provide compassionate and accurate guidance related to heart health and reproductive health.",
-                },
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.7,
-            stream=True,
-        )
-
-        for chunk in stream:
-            try:
-                token = chunk.choices[0].delta.content or ""
-            except (AttributeError, IndexError):
-                token = ""
-            if token:
-                yield token
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"OpenAI API streaming error: {e}", exc_info=True)
         raise HTTPException(status_code=503, detail="LLM request failed")
