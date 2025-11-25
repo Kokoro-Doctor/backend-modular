@@ -7,6 +7,7 @@ from typing import List
 # Environment variables (required ones left as KeyError to fail fast in prod)
 USERS_TABLE = os.environ["USERS_TABLE"]
 DOCTORS_TABLE = os.environ["DOCTORS_TABLE"]
+AUTH_TABLE = os.environ["AUTH_TABLE"]
 AUTH_TOKENS_TABLE = os.environ["AUTH_TOKENS_TABLE"]
 SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "SessionsTable")
 
@@ -15,7 +16,38 @@ BREVO_SMTP_KEY = os.environ["BREVO_SMTP_KEY"]
 BREVO_SMTP_SERVER = os.environ["BREVO_SMTP_SERVER"]
 BREVO_SMTP_PORT = int(os.environ["BREVO_SMTP_PORT"])
 
-FAST2SMS_API_KEY = os.environ["FAST2SMS_API_KEY"]
+SMS_AWS_REGION = os.environ.get("SMS_AWS_REGION", "ap-south-1")
+SMS_COUNTRY_CODE = os.environ.get("SMS_COUNTRY_CODE", "+91")
+JWT_SECRET = os.environ["JWT_SECRET"]
+JWT_ISSUER = os.environ.get("JWT_ISSUER", "kokoro.doctor")
+JWT_EXP_MINUTES = int(os.environ.get("JWT_EXP_MINUTES", "1440"))
+JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
+
+# Rate limiting defaults (all values are seconds/attempts)
+EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS = int(
+    os.environ.get("EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS", "5")
+)
+EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.environ.get("EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS", str(60 * 60))
+)
+MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS = int(
+    os.environ.get("MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS", "5")
+)
+MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.environ.get("MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS", str(15 * 60))
+)
+PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS = int(
+    os.environ.get("PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS", "3")
+)
+PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.environ.get("PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS", str(60 * 60))
+)
+PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS = int(
+    os.environ.get("PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS", "3")
+)
+PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS = int(
+    os.environ.get("PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS", str(15 * 60))
+)
 
 # Google client IDs list (kept same approach as your original)
 CLIENT_IDS: List[str] = [
@@ -29,5 +61,6 @@ CLIENT_IDS: List[str] = [
 dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
 users_table = dynamodb.Table(USERS_TABLE)
 doctors_table = dynamodb.Table(DOCTORS_TABLE)
+auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
 sessions_table = dynamodb.Table(SESSIONS_TABLE)

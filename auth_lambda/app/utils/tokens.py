@@ -20,3 +20,7 @@ def ttl_days_from_now(days: int) -> int:
     ttl = int(dt.timestamp())
     logger.debug(f"[tokens] ttl (days={days}) -> {ttl}")
     return ttl
+
+def generate_token_id() -> str:
+    """Generate a new UUID for token_id (same as generate_token but semantically clearer)"""
+    return generate_token()

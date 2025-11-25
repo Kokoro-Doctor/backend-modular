@@ -1,88 +1,102 @@
-from fastapi import APIRouter, HTTPException
-from app.models import schemas
-from app import config
-from app.utils.security import hash_password, verify_password
-from app.utils.tokens import generate_token, ttl_minutes_from_now
-from app.utils.email_utils import send_brevo_email
 from datetime import datetime, timezone
+
+from fastapi import APIRouter, HTTPException
+
+from app import config
 from app.logger import get_logger
+from app.models import schemas
+from app.routers.auth_common import SIGNUP_OTP_PURPOSE, validate_otp
+from app.utils.db_utils import (
+    ensure_auth_record,
+    generate_doctor_id,
+    get_doctor_by_phone,
+    normalize_phone_number,
+    update_auth_record,
+)
+from app.utils.jwt_utils import create_jwt
+from app.utils.security import hash_password
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["doctor-auth"])
 
+
 @router.post("/doctor/signup")
-def doctor_signup(data: schemas.DoctorSignup):
-    logger.info(f"[DoctorSignup] Received signup data: {data}")
+def doctor_signup(data: schemas.DoctorProfileCreate):
     try:
-        existing = config.doctors_table.get_item(Key={"email": data.email})
-        logger.info(f"[DoctorSignup] DynamoDB get_item result: {existing}")
+        normalized_phone = normalize_phone_number(data.phoneNumber)
+        if not normalized_phone:
+            raise HTTPException(status_code=400, detail="Invalid phone number")
 
-        if existing.get("Item"):
-            raise HTTPException(status_code=400, detail="Email already registered")
+        # Validate OTP first
+        validate_otp(normalized_phone, data.otp, SIGNUP_OTP_PURPOSE)
 
-        hashed = hash_password(data.password)
-        logger.info(f"[DoctorSignup] Hashed password generated")
+        existing_doctor = get_doctor_by_phone(normalized_phone)
+        if existing_doctor:
+            raise HTTPException(status_code=400, detail="Phone number already registered.")
 
-        config.doctors_table.put_item(Item={
-            "email": data.email,
-            "doctorname": data.doctorname,
-            "phoneNumber": data.phoneNumber,
-            "location": data.location,
-            "password": hashed,
-            "emailVerified": False,
-            "phoneVerified": False,
-            "onboarded": False,
-            "createdAt": datetime.now(timezone.utc).isoformat()
-        })
+        ensure_auth_record(normalized_phone)
 
-        token = generate_token()
-        config.auth_tokens_table.put_item(Item={
-            "email": data.email,
-            "purpose": "email_verification",
-            "token": token,
-            "ttl": ttl_minutes_from_now(15)
-        })
+        doctor_id = generate_doctor_id()
+        now_iso = datetime.now(timezone.utc).isoformat()
+        password = data.password.strip()
+        if not password:
+            raise HTTPException(status_code=400, detail="Password cannot be empty.")
 
-        verification_link = f"https://kokoro.doctor/verify-email?token={token}&email={data.email}"
-        subject = "Verify your email for Kokoro Doctor"
-        body = f"Click the link to verify your email: {verification_link}"
-        send_brevo_email(data.email, subject, body)
+        doctor_item = {
+            "doctor_id": doctor_id,
+            "name": data.name.strip(),
+            "phoneNumber": normalized_phone,
+            "createdAt": now_iso,
+            "passwordHash": hash_password(password),
+        }
 
-        logger.info(f"[DoctorSignup] Verification email sent to {data.email}")
-        logger.info(f"[DoctorSignup] Doctor {data.email} registered successfully")
-        return {"message": "Doctor registered. Please complete profile setup."}
+        if data.specialization:
+            doctor_item["specialization"] = data.specialization
+        if data.experience is not None:
+            doctor_item["experience"] = data.experience
+        if data.email:
+            doctor_item["email"] = data.email.lower()
 
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("[DoctorSignup] Unexpected error")
-        raise HTTPException(status_code=500, detail=str(e))
+        config.doctors_table.put_item(Item=doctor_item)
 
-
-@router.post("/doctor/login")
-def doctor_login(data: schemas.DoctorLogin):
-    logger.info(f"[DoctorLogin] Received login data for {data.email}")
-    try:
-        doctor = config.doctors_table.get_item(Key={"email": data.email}).get("Item")
-        if not doctor:
-            logger.warning(f"[DoctorLogin] Doctor not found: {data.email}")
-            raise HTTPException(status_code=400, detail="Doctor not found")
-
-        if not verify_password(data.password, doctor["password"]):
-            logger.warning(f"[DoctorLogin] Incorrect password for {data.email}")
-            raise HTTPException(status_code=400, detail="Incorrect password")
-
-        logger.info(f"[DoctorLogin] Login successful for {data.email}")
-        return {
-            "doctor": {
-                "name": doctor.get("name") or doctor.get("doctorname"),
-                "email": doctor["email"]
+        update_auth_record(
+            normalized_phone,
+            {
+                "role": "doctor",
+                "doctor_id": doctor_id,
+                "user_id": None,
+                "has_password": True,
+                "is_verified": True,
+                "last_login": now_iso,
+                "updated_at": now_iso
             }
+        )
+
+        profile = {
+            "doctor_id": doctor_id,
+            "name": doctor_item["name"],
+            "phoneNumber": normalized_phone,
+            "email": doctor_item.get("email"),
+            "specialization": doctor_item.get("specialization"),
+            "experience": doctor_item.get("experience")
+        }
+
+        access_token = create_jwt(
+            phone_number=normalized_phone,
+            role="doctor",
+            doctor_id=doctor_id
+        )
+
+        logger.info("[DoctorSignup] Created doctor %s", doctor_id)
+        return {
+            "message": "Doctor profile created successfully.",
+            "access_token": access_token,
+            "profile": profile
         }
 
     except HTTPException:
         raise
-    except Exception as e:
-        logger.exception("[DoctorLogin] Unexpected error")
-        raise HTTPException(status_code=500, detail=str(e))
+    except Exception as exc:
+        logger.exception("[DoctorSignup] Unexpected error")
+        raise HTTPException(status_code=500, detail=str(exc))

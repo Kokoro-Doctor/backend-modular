@@ -1,10 +1,19 @@
-from fastapi import APIRouter, HTTPException
-from google.oauth2 import id_token
-from google.auth.transport import requests as grequests
-from app import config
-from app.utils.tokens import generate_token
 from datetime import datetime, timezone
+
+from fastapi import APIRouter, HTTPException
+from google.auth.transport import requests as grequests
+from google.oauth2 import id_token
+
+from app import config
 from app.logger import get_logger
+from app.utils.db_utils import (
+    ensure_auth_record,
+    generate_user_id,
+    get_user_by_email,
+    normalize_phone_number,
+    update_auth_record,
+)
+from app.utils.jwt_utils import create_jwt
 
 logger = get_logger(__name__)
 
@@ -30,54 +39,94 @@ def google_auth(data: dict):
 
         logger.info(f"[GoogleAuth] Verified Google user -> {email}")
 
-        # check user in DB
-        resp = config.users_table.get_item(Key={"email": email})
-        user = resp.get("Item")
-        logger.debug(f"[GoogleAuth] DB response: {resp}")
+        user = get_user_by_email(email)
+        now_iso = datetime.now(timezone.utc).isoformat()
 
         if not user:
-            # create new user
+            user_id = generate_user_id()
+            user_name = name or "Unknown User"
             user = {
-                "username": name or "Unknown User",
+                "user_id": user_id,
+                "name": user_name,
+                "username": user_name,
                 "email": email,
-                "password": None,
                 "phoneNumber": None,
-                "location": None,
-                "emailVerified": True,
-                "phoneVerified": False,
                 "picture": picture,
                 "authProvider": "google",
-                "createdAt": datetime.now(timezone.utc).isoformat()
+                "emailVerified": True,
+                "createdAt": now_iso,
             }
             config.users_table.put_item(Item=user)
-            logger.info("[GoogleAuth] New user created")
+            logger.info(f"[GoogleAuth] New user created with ID: {user_id}")
         else:
-            # update existing
-            needs_update = False
-            if not user.get("picture") and picture:
-                user["picture"] = picture
-                needs_update = True
-            if not user.get("authProvider"):
-                user["authProvider"] = "password"
-            if "google" not in user.get("authProvider", ""):
-                user["authProvider"] = user["authProvider"] + "+google"
-            if needs_update:
-                config.users_table.put_item(Item=user)
-                logger.info("[GoogleAuth] Updated user with google data")
+            user_id = user.get("user_id")
+            update_expr_parts = []
+            expr_attr_values = {}
 
-        # issue app token (UUID)
-        access_token = generate_token()
-        response_data = {
-            "user": {
-                "name": user.get("username", "Unknown User"),
-                "email": user["email"],
-                "picture": user.get("picture") or picture,
-                "authProvider": user.get("authProvider", "unknown")
-            },
-            "access_token": access_token
+            if not user.get("name") and name:
+                update_expr_parts.append("name = :name")
+                expr_attr_values[":name"] = name
+            if not user.get("username") and name:
+                update_expr_parts.append("username = :username")
+                expr_attr_values[":username"] = name
+            if picture and user.get("picture") != picture:
+                update_expr_parts.append("picture = :pic")
+                expr_attr_values[":pic"] = picture
+            if user.get("authProvider") != "google":
+                update_expr_parts.append("authProvider = :auth")
+                expr_attr_values[":auth"] = "google"
+
+            if update_expr_parts:
+                config.users_table.update_item(
+                    Key={"user_id": user_id},
+                    UpdateExpression="SET " + ", ".join(update_expr_parts),
+                    ExpressionAttributeValues=expr_attr_values
+                )
+                # refresh local copy
+                user = get_user_by_email(email) or user
+
+        phone_number = user.get("phoneNumber")
+        normalized_phone = (
+            normalize_phone_number(phone_number) if phone_number else None
+        )
+
+        if normalized_phone:
+            ensure_auth_record(normalized_phone)
+            update_auth_record(
+                normalized_phone,
+                {
+                    "role": "user",
+                    "user_id": user["user_id"],
+                    "is_verified": True,
+                    "last_login": now_iso,
+                    "updated_at": now_iso,
+                },
+            )
+        else:
+            logger.info("[GoogleAuth] No phone number on record for %s", email)
+
+        token_phone = normalized_phone or f"google:{user['user_id']}"
+        access_token = create_jwt(
+            phone_number=token_phone,
+            role="user",
+            user_id=user["user_id"],
+        )
+
+        profile = {
+            "user_id": user["user_id"],
+            "name": user.get("name") or user.get("username"),
+            "email": user.get("email"),
+            "phoneNumber": normalized_phone,
+            "picture": user.get("picture") or picture,
         }
-        logger.info("[GoogleAuth] Returning response")
-        return response_data
+
+        logger.info("[GoogleAuth] Returning response for %s", email)
+        return {
+            "profile": profile,
+            "access_token": access_token,
+            "role": "user",
+            "message": "Login successful via Google",
+        }
 
     except Exception as e:
         logger.exception("[GoogleAuth] Exception during auth")

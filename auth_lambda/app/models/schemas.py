@@ -1,46 +1,45 @@
-from pydantic import BaseModel, EmailStr, Field
-from typing import Optional
+from typing import Literal, Optional
 
-# Auth / request schemas
+from pydantic import BaseModel, EmailStr, Field
+
 
 class GoogleAuthRequest(BaseModel):
     token: str  # ID token
 
-class UserSignup(BaseModel):
-    username: str = Field(..., min_length=2)
-    email: EmailStr
-    password: str = Field(..., min_length=3, max_length=25)
-    phoneNumber: Optional[str] = None
-    location: Optional[str] = None
 
-class UserLogin(BaseModel):
-    email: EmailStr
-    password: str
+class SignupOtpRequest(BaseModel):
+    phoneNumber: str = Field(..., min_length=8)
 
-class DoctorSignup(BaseModel):
-    doctorname: str = Field(..., min_length=2)
-    email: EmailStr
-    password: str = Field(..., min_length=5, max_length=25)
-    phoneNumber: Optional[str] = None
-    location: Optional[str] = None
 
-class DoctorLogin(BaseModel):
-    email: EmailStr
-    password: str
+class LoginOtpRequest(BaseModel):
+    phoneNumber: str = Field(..., min_length=8)
 
-class PasswordResetRequest(BaseModel):
-    email: EmailStr
 
-class PasswordResetConfirm(BaseModel):
-    email: EmailStr
-    token: str
-    new_password: str
+class SignupOtpVerify(BaseModel):
+    phoneNumber: str = Field(..., min_length=8)
+    otp: str = Field(..., min_length=4, max_length=6)
+    role: Literal["user", "doctor"]
 
-class MobileOTPRequest(BaseModel):
-    email: str
-    phoneNumber: str
 
-class MobileOTPVerify(BaseModel):
-    email: str
-    phoneNumber: str
-    otp: str
+class LoginRequest(BaseModel):
+    phoneNumber: str = Field(..., min_length=8)
+    password: Optional[str] = Field(default=None, min_length=6)
+    otp: Optional[str] = Field(default=None, min_length=4, max_length=6)
+
+
+class UserProfileCreate(BaseModel):
+    phoneNumber: str = Field(..., min_length=8)
+    otp: str = Field(..., min_length=4, max_length=6)
+    name: str = Field(..., min_length=2)
+    password: str = Field(..., min_length=6)
+    email: Optional[EmailStr] = None
+
+
+class DoctorProfileCreate(BaseModel):
+    phoneNumber: str = Field(..., min_length=8)
+    otp: str = Field(..., min_length=4, max_length=6)
+    name: str = Field(..., min_length=2)
+    password: str = Field(..., min_length=6)
+    specialization: Optional[str] = None
+    experience: Optional[int] = Field(default=None, ge=0, le=80)
+    email: Optional[EmailStr] = None
