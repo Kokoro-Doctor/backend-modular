@@ -2,11 +2,12 @@ import base64
 import mimetypes
 import urllib.parse
 from app.logger import logger
-from app.config import S3, S3_BUCKET
+from app.config import S3, S3_BUCKET, S3_FOLDER_PREFIX
 
-def upload_doc_to_s3(email, doc_type, filename, base64_content):
+def upload_doc_to_s3(doctor_id, doc_type, filename, base64_content):
     try:
-        key = f"doctors/{email}/{doc_type}/{urllib.parse.quote(filename)}"
+        # Use folder prefix: DoctorDocuments/doctors/{doctor_id}/{doc_type}/{filename}
+        key = f"{S3_FOLDER_PREFIX}doctors/{doctor_id}/{doc_type}/{urllib.parse.quote(filename)}"
         file_bytes = base64.b64decode(base64_content)
         content_type, _ = mimetypes.guess_type(filename)
         content_type = content_type or "application/octet-stream"
@@ -20,6 +21,9 @@ def upload_doc_to_s3(email, doc_type, filename, base64_content):
 
 def generate_presigned_url(key: str, expires_in=3600):
     try:
+        # If key doesn't already have the folder prefix, add it
+        if not key.startswith(S3_FOLDER_PREFIX):
+            key = f"{S3_FOLDER_PREFIX}{key}"
         return S3.generate_presigned_url(
             ClientMethod="get_object",
             Params={"Bucket": S3_BUCKET, "Key": key},

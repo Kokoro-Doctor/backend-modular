@@ -10,7 +10,7 @@ def store_message(identifier, user_message, bot_message):
         timestamp = int(datetime.now(timezone.utc).timestamp())
         chat_table.put_item(
             Item={
-                "email": identifier,
+                "user_id": identifier,
                 "timestamp": timestamp,
                 "user_message": user_message,
                 "bot_message": bot_message,
@@ -24,7 +24,7 @@ def store_message(identifier, user_message, bot_message):
 def get_chat_history(identifier):
     try:
         response = chat_table.query(
-            KeyConditionExpression="email = :id_value",
+            KeyConditionExpression="user_id = :id_value",
             ExpressionAttributeValues={":id_value": identifier},
             ScanIndexForward=False,
             Limit=5,

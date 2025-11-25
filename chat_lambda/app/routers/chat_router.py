@@ -22,11 +22,12 @@ async def chat(request: ChatRequest):
     logger.info(f"Calling RAG for {identifier}")
     rag_response = call_rag_server(request.message, request.language)
     if rag_response:
+        logger.info(f"RAG response received for {identifier}")
         store_message(identifier, request.message, rag_response)
         return {"text": rag_response}
 
     # Fallback to LLM
-    logger.info(f"Calling LLM for {identifier}")
+    logger.info(f"RAG unavailable or returned no response. Falling back to LLM for {identifier}")
     ai_response = call_llm_api(history, request.message, request.language)
     store_message(identifier, request.message, ai_response)
     return {"text": ai_response}

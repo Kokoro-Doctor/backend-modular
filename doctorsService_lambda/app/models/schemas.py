@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 from typing import Optional, List
 from enum import Enum
 
@@ -7,7 +7,7 @@ class UploadDoc(BaseModel):
     base64_content: str
 
 class DoctorProfileUpdate(BaseModel):
-    email: EmailStr
+    doctor_id: str
     description: Optional[str] = None
     specialization: Optional[str] = None
     experience: Optional[str] = None
@@ -24,8 +24,8 @@ class FetchDoctorsRequest(BaseModel):
     category: Optional[str] = None
 
 class SubscribeRequest(BaseModel):
-    user_email: EmailStr
-    doctor_email: EmailStr
+    user_id: str
+    doctor_id: str
 
 class AvailabilitySlot(BaseModel):
     start: str

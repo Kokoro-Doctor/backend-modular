@@ -18,7 +18,14 @@ def fetch_doctors(request: FetchDoctorsRequest):
         for doc in doctors:
             for field in ["profilePhoto", "degreeCertificate", "govtIdProof"]:
                 if field in doc and doc[field]:
-                    key = doc[field].replace(f"https://{S3_BUCKET}.s3.amazonaws.com/", "")
+                    # Extract key from S3 URL (handles both old and new bucket names)
+                    url = doc[field]
+                    # Extract key by finding "s3.amazonaws.com/" and taking everything after it
+                    if "s3.amazonaws.com/" in url:
+                        key = url.split("s3.amazonaws.com/", 1)[1]
+                    else:
+                        # If it's not a full URL, assume it's already a key
+                        key = url
                     doc[field] = generate_presigned_url(key)
         return {"doctors": doctors}
     except Exception as e:
