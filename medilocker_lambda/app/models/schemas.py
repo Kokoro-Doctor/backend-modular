@@ -16,3 +16,8 @@ class EmailRequest(BaseModel):
 class FileRequest(BaseModel):
     email: str
     filename: str
+
+class PrescriptionRequest(BaseModel):
+    email: str
+    filenames: Optional[List[str]] = None  # If None, use all files
+    patient_symptoms: Optional[str] = None  # Optional additional context

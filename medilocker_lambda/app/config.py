@@ -6,3 +6,6 @@ import boto3
 # AWS S3 client
 S3_BUCKET = os.getenv("S3_BUCKET", "kokoro-medilocker")
 s3_client = boto3.client("s3")
+
+# OpenAI API Key
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

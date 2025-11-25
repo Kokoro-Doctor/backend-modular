@@ -1,8 +1,8 @@
 import os
 import boto3
 from typing import List
-from dotenv import load_dotenv
-load_dotenv()
+# from dotenv import load_dotenv
+# load_dotenv()
 
 # Environment variables (required ones left as KeyError to fail fast in prod)
 USERS_TABLE = os.environ["USERS_TABLE"]
