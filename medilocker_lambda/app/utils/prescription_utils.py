@@ -4,7 +4,7 @@ from typing import List, Optional
 from fastapi import HTTPException
 from openai import OpenAI
 import PyPDF2
-from app.config import s3_client, S3_BUCKET, OPENAI_API_KEY
+from app.config import s3_client, S3_BUCKET, S3_FOLDER_PREFIX, OPENAI_API_KEY
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -61,11 +61,12 @@ def extract_text_from_file(file_bytes: bytes, filename: str) -> str:
             logger.warning(f"Could not extract text from {filename}, content_type: {content_type}")
             return ""
 
-def download_and_extract_documents(email: str, filenames: Optional[List[str]] = None) -> str:
+def download_and_extract_documents(user_id: str, filenames: Optional[List[str]] = None) -> str:
     """Download documents from S3 and extract text from them."""
     try:
         # List all files for the user
-        response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=f"{email}/")
+        prefix = f"{S3_FOLDER_PREFIX}{user_id}/"
+        response = s3_client.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix)
         all_files = response.get("Contents", [])
         
         if not all_files:
@@ -77,7 +78,7 @@ def download_and_extract_documents(email: str, filenames: Optional[List[str]] = 
         if filenames:
             files_to_process = [
                 obj for obj in all_files 
-                if obj["Key"].split(f"{email}/", 1)[1] in filenames
+                if obj["Key"].split(f"{prefix}", 1)[1] in filenames
             ]
             if not files_to_process:
                 raise HTTPException(status_code=404, detail="Specified files not found")
@@ -87,7 +88,7 @@ def download_and_extract_documents(email: str, filenames: Optional[List[str]] = 
         # Download and extract text from each file
         for obj in files_to_process:
             key = obj["Key"]
-            filename = key.split(f"{email}/", 1)[1]
+            filename = key.split(f"{prefix}", 1)[1]
             
             try:
                 # Download file from S3
@@ -138,13 +139,82 @@ Patient's Current Symptoms/Complaints:
 """
         
         prompt += """
-Please generate a professional prescription that includes:
-1. Diagnosis based on the documents
-2. Medications with dosages and frequency
-3. Instructions for taking medications
-4. Any additional recommendations or follow-up instructions
+Please generate a professional prescription in the following EXACT format:
 
-Format the prescription clearly and professionally.
+------------------------------------------------------------
+
+[Clinic/Hospital Logo]         PRESCRIPTION No: _____
+
+Clinic name:
+
+Address:
+
+Phone / Email:
+
+
+
+Date: DD-MM-YYYY
+
+Patient Name: ________________    Patient ID: ________
+
+Age / DOB: _____   Sex: M / F / O   Weight: __ kg
+
+Allergies: ____________________    Pregnancy/BF: Yes/No
+
+Diagnosis / Indication: ____________________
+
+
+
+Medications:
+
+1) DRUG (generic, CAPS): ______  Strength: __   Form: __
+
+   Dose: __    Route: __    Frequency: __    Duration: __ days
+
+   Qty to dispense: __ units     Repeats: __
+
+   Instructions: _________________________________________
+
+
+
+2) DRUG (generic): ...
+
+   ...
+
+
+
+Lab tests / Investigations ordered: ____________________
+
+Advice / counselling: __________________________________
+
+Follow-up: ____________________
+
+
+
+Prescribed by:
+
+Dr. Full Name (as registered): __________________
+
+Qualification: _________   Registration No.: __________
+
+Clinic / Dept.: __________________   Signature / e-sign: _____
+
+[Clinic stamp if physical]
+
+
+
+Important: Prescribe generic names in CAPITALS. Check allergies and renal function before prescribing renally excreted medicines. 
+
+------------------------------------------------------------
+
+IMPORTANT INSTRUCTIONS:
+- Fill in all the fields based on the medical documents and patient symptoms provided
+- Use generic drug names in CAPITAL LETTERS
+- Include proper dosages, frequencies, routes, and durations
+- Format the prescription exactly as shown above with proper spacing and line breaks
+- Use underscores (___) for empty fields that need to be filled
+- Include all relevant medications, lab tests, advice, and follow-up information
+- Maintain the exact structure and formatting
 """
         
         response = client.chat.completions.create(
@@ -152,7 +222,7 @@ Format the prescription clearly and professionally.
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a professional medical AI assistant. Generate accurate, clear, and professional prescriptions based on medical documents. Always include proper dosages, frequencies, and clear instructions."
+                    "content": "You are a professional medical AI assistant. Generate accurate, clear, and professional prescriptions based on medical documents. Always include proper dosages, frequencies, and clear instructions. You MUST format prescriptions exactly as specified in the user's format template, maintaining the exact structure, spacing, and field layout. Use generic drug names in CAPITAL LETTERS."
                 },
                 {
                     "role": "user",

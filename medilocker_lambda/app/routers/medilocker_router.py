@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import JSONResponse
 from app.utils import s3_utils
 from app.utils import prescription_utils
-from app.models.schemas import UploadRequest, EmailRequest, FileRequest, PrescriptionRequest
+from app.models.schemas import UploadRequest, UserRequest, FileRequest, PrescriptionRequest
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/medilocker", tags=["Medilocker"])
 @router.post("/upload")
 async def upload_file(body: UploadRequest):
     try:
-        s3_utils.upload_files(body.email, body.files)
+        s3_utils.upload_files(body.user_id, body.files)
         return JSONResponse(
             content={"message": "Files uploaded successfully"},
             headers={
@@ -25,9 +25,9 @@ async def upload_file(body: UploadRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/fetch")
-async def fetch_files(body: EmailRequest):
+async def fetch_files(body: UserRequest):
     try:
-        files_info = s3_utils.fetch_files(body.email)
+        files_info = s3_utils.fetch_files(body.user_id)
         if not files_info:
             return JSONResponse(
                 content={"message": "No files found", "files": []},
@@ -50,7 +50,7 @@ async def fetch_files(body: EmailRequest):
 @router.post("/download")
 async def generate_download_link(body: FileRequest):
     try:
-        url = s3_utils.generate_download_link(body.email, body.filename)
+        url = s3_utils.generate_download_link(body.user_id, body.filename)
         return JSONResponse(
             content={"download_url": url},
             headers={
@@ -65,7 +65,7 @@ async def generate_download_link(body: FileRequest):
 @router.post("/delete")
 async def delete_file(body: FileRequest):
     try:
-        s3_utils.delete_file(body.email, body.filename)
+        s3_utils.delete_file(body.user_id, body.filename)
         return JSONResponse(
             content={"message": "File deleted successfully"},
             headers={
@@ -85,14 +85,14 @@ async def generate_prescription(body: PrescriptionRequest):
     """
     try:
         # Extract text from documents
-        logger.info(f"Extracting text from documents for {body.email}")
+        logger.info(f"Extracting text from documents for {body.user_id}")
         document_text = prescription_utils.download_and_extract_documents(
-            body.email, 
+            body.user_id, 
             body.filenames
         )
         
         # Generate prescription using ChatGPT
-        logger.info(f"Generating prescription for {body.email}")
+        logger.info(f"Generating prescription for {body.user_id}")
         prescription = prescription_utils.generate_prescription(
             document_text,
             body.patient_symptoms
