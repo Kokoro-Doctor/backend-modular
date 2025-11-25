@@ -8,8 +8,8 @@ router = APIRouter(prefix="/doctorsService", tags=["Subscribe"])
 @router.post("/subscribe")
 def subscribe_doctor(data: SubscribeRequest):
     try:
-        doctor = DOCTORS_TABLE.get_item(Key={"email": data.doctor_email}).get("Item")
-        user = USERS_TABLE.get_item(Key={"email": data.user_email}).get("Item")
+        doctor = DOCTORS_TABLE.get_item(Key={"doctor_id": data.doctor_id}).get("Item")
+        user = USERS_TABLE.get_item(Key={"user_id": data.user_id}).get("Item")
 
         if not doctor:
             raise HTTPException(status_code=404, detail="Doctor not found")
@@ -18,18 +18,18 @@ def subscribe_doctor(data: SubscribeRequest):
 
         subscribers = doctor.get("subscribers", [])
         subscribed = user.get("subscribed_doctors", [])
-        if data.user_email in subscribers:
+        if data.user_id in subscribers:
             return {"message": "Already subscribed"}
 
         DOCTORS_TABLE.update_item(
-            Key={"email": data.doctor_email},
+            Key={"doctor_id": data.doctor_id},
             UpdateExpression="SET subscribers = list_append(if_not_exists(subscribers, :empty), :u)",
-            ExpressionAttributeValues={":u": [data.user_email], ":empty": []},
+            ExpressionAttributeValues={":u": [data.user_id], ":empty": []},
         )
         USERS_TABLE.update_item(
-            Key={"email": data.user_email},
+            Key={"user_id": data.user_id},
             UpdateExpression="SET subscribed_doctors = list_append(if_not_exists(subscribed_doctors, :empty), :d)",
-            ExpressionAttributeValues={":d": [data.doctor_email], ":empty": []},
+            ExpressionAttributeValues={":d": [data.doctor_id], ":empty": []},
         )
 
         return {"message": "Subscribed successfully"}

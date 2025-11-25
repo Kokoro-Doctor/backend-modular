@@ -102,10 +102,10 @@ Base path: `/chat`
 
 Set the following variables for each Lambda before deployment (SAM templates wire them in production; required for local runs or tests):
 
-- **Auth Service**: `USERS_TABLE`, `DOCTORS_TABLE`, `AUTH_TOKENS_TABLE`, `SESSIONS_TABLE` (optional), `BREVO_SMTP_USER`, `BREVO_SMTP_KEY`, `BREVO_SMTP_SERVER`, `BREVO_SMTP_PORT`, `FAST2SMS_API_KEY`
-- **Doctor Service**: `DOCTORS_TABLE`, `USERS_TABLE`, `S3_BUCKET` (default `kokoro-doctor-documents`)
+- **Auth Service**: `USERS_TABLE`, `DOCTORS_TABLE`, `AUTH_TOKENS_TABLE`, `SESSIONS_TABLE` (optional), `BREVO_SMTP_USER`, `BREVO_SMTP_KEY`, `BREVO_SMTP_SERVER`, `BREVO_SMTP_PORT`, `SMS_AWS_REGION` (default `ap-south-1`), `SMS_COUNTRY_CODE` (default `+91`). Optional rate-limit overrides: `EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS`, `EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS`, `MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS`, `MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS`, `PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS`, `PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS`, `PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS`, `PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS`.
+- **Doctor Service**: `DOCTORS_TABLE`, `USERS_TABLE`, `S3_BUCKET` (default `kokoro-doctor`, uses `DoctorDocuments/` folder)
 - **Booking Service**: `AWS_REGION` (default `ap-south-1`)
-- **Medilocker Service**: `S3_BUCKET` (default `kokoro-medilocker`), `OPENAI_API_KEY`
+- **Medilocker Service**: `S3_BUCKET` (default `kokoro-doctor`, uses `Medilocker/` folder), `OPENAI_API_KEY`
 - **Chat Service**: `DYNAMODB_TABLE`, `OPENAI_API_KEY`, `RAG_SERVER_URL`
 - **Payment Lambda**: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `DYNAMODB_TABLE_NAME`
 
@@ -135,10 +135,11 @@ Set the following variables for each Lambda before deployment (SAM templates wir
 
 ## ☁️ S3 Buckets
 
-| Bucket Name               | Usage                         |
-| ------------------------- | ----------------------------- |
-| `kokoro-medilocker`       | User-uploaded medical files   |
-| `kokoro-doctor-documents` | Doctor registration documents |
+| Bucket Name     | Usage                                                |
+| --------------- | ---------------------------------------------------- |
+| `kokoro-doctor` | Single bucket with two folders:                      |
+|                 | - `Medilocker/` - User-uploaded medical files        |
+|                 | - `DoctorDocuments/` - Doctor registration documents |
 
 ---
 

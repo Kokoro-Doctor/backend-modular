@@ -7,17 +7,17 @@ class FileUploadModel(BaseModel):
     metadata: Optional[Dict[str, str]] = {}
 
 class UploadRequest(BaseModel):
-    email: str
+    user_id: str
     files: List[FileUploadModel]
 
-class EmailRequest(BaseModel):
-    email: str
+class UserRequest(BaseModel):
+    user_id: str
 
 class FileRequest(BaseModel):
-    email: str
+    user_id: str
     filename: str
 
 class PrescriptionRequest(BaseModel):
-    email: str
+    user_id: str
     filenames: Optional[List[str]] = None  # If None, use all files
     patient_symptoms: Optional[str] = None  # Optional additional context
