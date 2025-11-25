@@ -1,3 +1,5 @@
 .aws-sam
 .DS_Store
 template.yaml
+.Docs/
+.csv_importer/
