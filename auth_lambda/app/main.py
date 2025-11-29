@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
-from app.routers import auth_user, auth_doctor, auth_google, auth_common
+from app.routers import auth_user, auth_doctor, auth_google, auth_common, admin_router
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -41,6 +41,7 @@ app.include_router(auth_google.router)
 app.include_router(auth_user.router)
 app.include_router(auth_doctor.router)
 app.include_router(auth_common.router)
+app.include_router(admin_router.router)
 
 # Mangum handler for AWS Lambda
 handler = Mangum(app)

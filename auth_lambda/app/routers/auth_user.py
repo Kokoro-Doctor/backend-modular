@@ -14,7 +14,6 @@ from app.utils.db_utils import (
     update_auth_record,
 )
 from app.utils.jwt_utils import create_jwt
-from app.utils.security import hash_password
 
 logger = get_logger(__name__)
 
@@ -23,6 +22,7 @@ router = APIRouter(prefix="/auth", tags=["user-auth"])
 
 @router.post("/user/signup")
 def user_signup(data: schemas.UserProfileCreate):
+    """Passwordless user signup - OTP verification only."""
     try:
         normalized_phone = normalize_phone_number(data.phoneNumber)
         if not normalized_phone:
@@ -39,16 +39,12 @@ def user_signup(data: schemas.UserProfileCreate):
 
         user_id = generate_user_id()
         now_iso = datetime.now(timezone.utc).isoformat()
-        password = data.password.strip()
-        if not password:
-            raise HTTPException(status_code=400, detail="Password cannot be empty.")
 
         user_item = {
             "user_id": user_id,
             "name": data.name.strip(),
             "phoneNumber": normalized_phone,
             "createdAt": now_iso,
-            "passwordHash": hash_password(password),
         }
 
         if data.email:
@@ -62,7 +58,7 @@ def user_signup(data: schemas.UserProfileCreate):
                 "role": "user",
                 "user_id": user_id,
                 "doctor_id": None,
-                "has_password": True,
+                "has_password": False,
                 "is_verified": True,
                 "last_login": now_iso,
                 "updated_at": now_iso
@@ -82,7 +78,7 @@ def user_signup(data: schemas.UserProfileCreate):
             user_id=user_id
         )
 
-        logger.info("[UserSignup] Created user %s", user_id)
+        logger.info("[UserSignup] Created user %s (passwordless)", user_id)
         return {
             "message": "User profile created successfully.",
             "access_token": access_token,

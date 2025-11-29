@@ -21,12 +21,11 @@ from app.utils.db_utils import (
 from app.utils.jwt_utils import create_jwt
 from app.utils.rate_limiter import RateLimitAction, rate_limit_guard
 from app.utils.sms_utils import send_otp_sms
-from app.utils.security import verify_password
 from app.utils.tokens import generate_token_id, ttl_minutes_from_now
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["otp-auth"])
+router = APIRouter(prefix="/auth", tags=["passwordless-auth"])
 
 LOGIN_OTP_PURPOSE = "login_otp"
 SIGNUP_OTP_PURPOSE = "signup_otp"
@@ -72,26 +71,12 @@ def _otp_send_failure() -> HTTPException:
     return HTTPException(status_code=500, detail="Failed to send OTP. Please try again later.")
 
 
-def _password_required_error() -> HTTPException:
-    return HTTPException(
-        status_code=400,
-        detail={
-            "error": "PASSWORD_LOGIN_REQUIRED",
-            "message": "This account requires a password login."
-        }
-    )
-
-
-def _login_discovery_response(role: str, has_password: bool) -> dict:
-    message = (
-        "Password required to continue."
-        if has_password
-        else "OTP required to continue."
-    )
+def _login_discovery_response(role: str) -> dict:
+    """Passwordless login discovery - always returns OTP required."""
     return {
         "role": role,
-        "has_password": has_password,
-        "message": message
+        "has_password": False,
+        "message": "OTP required to continue."
     }
 
 
@@ -231,6 +216,7 @@ def request_doctor_signup_otp(data: schemas.SignupOtpRequest):
 
 @router.post("/request-otp")
 def request_otp(data: schemas.LoginOtpRequest):
+    """Request OTP for passwordless login."""
     normalized_phone = normalize_phone_number(data.phoneNumber)
     if not normalized_phone:
         raise HTTPException(status_code=400, detail="Invalid phone number")
@@ -238,9 +224,6 @@ def request_otp(data: schemas.LoginOtpRequest):
     record = get_auth_record(normalized_phone)
     if not record or not _record_has_account(record):
         raise _not_registered_error()
-
-    if record.get("has_password"):
-        raise _password_required_error()
 
     with rate_limit_guard(RateLimitAction.MOBILE_OTP, normalized_phone):
         _dispatch_otp(normalized_phone, LOGIN_OTP_PURPOSE, record.get("role"))
@@ -275,6 +258,7 @@ def verify_signup_otp(data: schemas.SignupOtpVerify):
 
 @router.post("/login")
 def login(data: schemas.LoginRequest):
+    """Passwordless login - OTP only."""
     normalized_phone = normalize_phone_number(data.phoneNumber)
     if not normalized_phone:
         raise HTTPException(status_code=400, detail="Invalid phone number")
@@ -289,88 +273,16 @@ def login(data: schemas.LoginRequest):
     if not role:
         raise HTTPException(status_code=400, detail="Account role missing. Please contact support.")
 
-    has_password = bool(record.get("has_password"))
+    # If no OTP provided, return discovery response
+    if not data.otp:
+        return _login_discovery_response(role)
 
-    if not data.password and not data.otp:
-        return _login_discovery_response(role, has_password)
-
-    if data.password:
-        password = data.password.strip()
-        if not password:
-            raise HTTPException(status_code=400, detail="Password cannot be empty.")
-        return _login_with_password(normalized_phone, record, password)
-
-    if data.otp:
-        otp = data.otp.strip()
-        if not otp:
-            raise HTTPException(status_code=400, detail="OTP cannot be empty.")
-        if has_password:
-            raise _password_required_error()
-        return _login_with_otp(normalized_phone, record, otp)
-
-    if has_password:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "PASSWORD_REQUIRED",
-                "message": "Password is required for this account."
-            }
-        )
-
-    return _login_discovery_response(role, has_password=False)
-
-
-def _login_with_password(normalized_phone: str, record: dict, password: str):
-    role = record.get("role")
-    password_hash = None
-    profile = {}
-    if role == "user":
-        user = get_user_by_id(record.get("user_id"))
-        if not user:
-            raise HTTPException(status_code=404, detail="User record missing. Please contact support.")
-        password_hash = user.get("passwordHash")
-        profile = _build_user_payload(user)
-    elif role == "doctor":
-        doctor = get_doctor_by_id(record.get("doctor_id"))
-        if not doctor:
-            raise HTTPException(status_code=404, detail="Doctor record missing. Please contact support.")
-        password_hash = doctor.get("passwordHash")
-        profile = _build_doctor_payload(doctor)
-    else:
-        raise HTTPException(status_code=400, detail="Unknown account role. Please contact support.")
-
-    if not password_hash:
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "error": "PASSWORD_NOT_SET",
-                "message": "Password not configured. Please reset your password."
-            }
-        )
-
-    if not verify_password(password, password_hash):
-        raise HTTPException(
-            status_code=401,
-            detail={
-                "error": "INVALID_CREDENTIALS",
-                "message": "Incorrect password. Please try again."
-            }
-        )
-
-    now_iso = datetime.now(timezone.utc).isoformat()
-    update_auth_record(
-        normalized_phone,
-        {
-            "is_verified": True,
-            "has_password": True,
-            "role": role,
-            "last_login": now_iso,
-            "last_verified_at": now_iso,
-            "updated_at": now_iso
-        }
-    )
-    logger.info("[Login] Password login successful for %s (%s)", normalized_phone, role)
-    return _issue_login_response(role, normalized_phone, profile)
+    # Verify OTP and login
+    otp = data.otp.strip()
+    if not otp:
+        raise HTTPException(status_code=400, detail="OTP cannot be empty.")
+    
+    return _login_with_otp(normalized_phone, record, otp)
 
 
 def _login_with_otp(normalized_phone: str, record: dict, otp: str):

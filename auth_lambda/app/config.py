@@ -57,6 +57,9 @@ CLIENT_IDS: List[str] = [
     "569847732356-v4pm3kfbrb0i3adcbchn82qcl7ua1cm8.apps.googleusercontent.com",
 ]
 
+# Admin key for internal operations (set via environment variable)
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "change-me-in-production")
+
 # DynamoDB resource & table handles
 dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
 users_table = dynamodb.Table(USERS_TABLE)
@@ -64,3 +67,13 @@ doctors_table = dynamodb.Table(DOCTORS_TABLE)
 auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
 sessions_table = dynamodb.Table(SESSIONS_TABLE)
+
+# Additional tables for account deletion
+booking_table = dynamodb.Table("DoctorBookingsTable")
+availability_table = dynamodb.Table("DoctorAvailabilityTable")
+chat_table = dynamodb.Table("ChatHistory")
+payments_table = dynamodb.Table("PaymentsTable")
+
+# S3 client for file deletion
+s3_client = boto3.client("s3", region_name=SMS_AWS_REGION)
+S3_BUCKET = os.environ.get("S3_BUCKET", "kokoro-doctor")

@@ -14,7 +14,6 @@ from app.utils.db_utils import (
     update_auth_record,
 )
 from app.utils.jwt_utils import create_jwt
-from app.utils.security import hash_password
 
 logger = get_logger(__name__)
 
@@ -23,6 +22,7 @@ router = APIRouter(prefix="/auth", tags=["doctor-auth"])
 
 @router.post("/doctor/signup")
 def doctor_signup(data: schemas.DoctorProfileCreate):
+    """Passwordless doctor signup - OTP verification only."""
     try:
         normalized_phone = normalize_phone_number(data.phoneNumber)
         if not normalized_phone:
@@ -39,16 +39,12 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
 
         doctor_id = generate_doctor_id()
         now_iso = datetime.now(timezone.utc).isoformat()
-        password = data.password.strip()
-        if not password:
-            raise HTTPException(status_code=400, detail="Password cannot be empty.")
 
         doctor_item = {
             "doctor_id": doctor_id,
-            "name": data.name.strip(),
+            "doctorname": data.name.strip(),
             "phoneNumber": normalized_phone,
             "createdAt": now_iso,
-            "passwordHash": hash_password(password),
         }
 
         if data.specialization:
@@ -66,7 +62,7 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
                 "role": "doctor",
                 "doctor_id": doctor_id,
                 "user_id": None,
-                "has_password": True,
+                "has_password": False,
                 "is_verified": True,
                 "last_login": now_iso,
                 "updated_at": now_iso
@@ -75,7 +71,7 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
 
         profile = {
             "doctor_id": doctor_id,
-            "name": doctor_item["name"],
+            "name": doctor_item["doctorname"],
             "phoneNumber": normalized_phone,
             "email": doctor_item.get("email"),
             "specialization": doctor_item.get("specialization"),
@@ -88,7 +84,7 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
             doctor_id=doctor_id
         )
 
-        logger.info("[DoctorSignup] Created doctor %s", doctor_id)
+        logger.info("[DoctorSignup] Created doctor %s (passwordless)", doctor_id)
         return {
             "message": "Doctor profile created successfully.",
             "access_token": access_token,
