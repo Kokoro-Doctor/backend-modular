@@ -117,7 +117,7 @@ Set the following variables for each Lambda before deployment (SAM templates wir
 | ------------------------- | ---------------------------------------- |
 | `Users`                   | User login data, subscriptions           |
 | `Doctors`                 | Doctor data and onboarding status        |
-| `DoctorAvailabilityTable` | Stores time slots per doctor per weekday |
+| `DoctorAvailabilityTable` | Stores time slots per doctor per date (PK: doctor_id, SK: date#slot_time) |
 | `DoctorBookingsTable`     | Stores user bookings (PK/SK + GSI)       |
 | `ChatHistory`             | Stores user chat logs with timestamps    |
 | `PaymentsTable`           | Stores Razorpay payment info             |
