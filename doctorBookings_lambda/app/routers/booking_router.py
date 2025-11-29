@@ -32,19 +32,28 @@ def cancel_slot(data: CancelSlotInput):
 @router.post("/available")
 def get_available_slots(data: AvailableSlotsRequest):
     try:
-        date_obj = datetime.strptime(data.date, "%Y-%m-%d")
-        day = date_obj.strftime("%A")
-        pk = f"{data.doctor_id}#{day}"
+        # Validate date format
+        try:
+            datetime.strptime(data.date, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(400, "Invalid date format. Use YYYY-MM-DD")
 
-        res = dynamodb_utils.query_availability(pk)
-        slots = [
-            {
-                "start": i["SK"].split("-")[0],
-                "end": i["SK"].split("-")[1],
-                "available": i.get("available", True)
-            }
-            for i in res.get("Items", [])
-        ]
+        # Query availability for the specific date
+        res = dynamodb_utils.query_availability(data.doctor_id, data.date)
+        
+        slots = []
+        for item in res.get("Items", []):
+            # SK format: date#slot_time (e.g., "2025-11-28#10:00")
+            sk_parts = item["SK"].split("#")
+            if len(sk_parts) == 2:
+                slot_time = sk_parts[1]
+                slots.append({
+                    "start": slot_time,
+                    "available": item.get("available", True),
+                    "user_id": item.get("user_id"),
+                    "booking_id": item.get("booking_id")
+                })
+        
         return {"slots": slots}
     except Exception as e:
         error_utils.handle_exception(e, "Fetch available slots")

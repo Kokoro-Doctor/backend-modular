@@ -42,11 +42,11 @@ class WeekDay(str, Enum):
 
 class DoctorSlotsSetRequest(BaseModel):
     doctor_id: str
-    day: WeekDay
+    date: str  # YYYY-MM-DD format
     slots: List[AvailabilitySlot]
 
 class DoctorSlotUpdateRequest(BaseModel):
     doctor_id: str
-    day: WeekDay
-    slot: AvailabilitySlot
+    date: str  # YYYY-MM-DD format
+    slot_time: str  # HH:MM format (e.g., "10:00")
     available: Optional[bool] = True
