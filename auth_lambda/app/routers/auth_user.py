@@ -22,7 +22,6 @@ router = APIRouter(prefix="/auth", tags=["user-auth"])
 
 @router.post("/user/signup")
 def user_signup(data: schemas.UserProfileCreate):
-    """Passwordless user signup - OTP verification only."""
     try:
         normalized_phone = normalize_phone_number(data.phoneNumber)
         if not normalized_phone:
@@ -58,7 +57,6 @@ def user_signup(data: schemas.UserProfileCreate):
                 "role": "user",
                 "user_id": user_id,
                 "doctor_id": None,
-                "has_password": False,
                 "is_verified": True,
                 "last_login": now_iso,
                 "updated_at": now_iso
@@ -78,7 +76,7 @@ def user_signup(data: schemas.UserProfileCreate):
             user_id=user_id
         )
 
-        logger.info("[UserSignup] Created user %s (passwordless)", user_id)
+        logger.info("[UserSignup] Created user %s", user_id)
         return {
             "message": "User profile created successfully.",
             "access_token": access_token,

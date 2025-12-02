@@ -12,7 +12,7 @@ app = FastAPI(title="Kokoro Auth Service")
 # CORS configuration (same as original)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://kokoro.doctor", "http://localhost:8081"],
+    allow_origins=["https://kokoro.doctor", "http://localhost:8081", "http://metafied.co/"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -31,7 +31,7 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
         status_code=exc.status_code,
         content={"detail": exc.detail},
         headers={
-            "Access-Control-Allow-Origin": "https://kokoro.doctor",
+            "Access-Control-Allow-Origin": "https://kokoro.doctor, http://metafied.co/",
             "Access-Control-Allow-Credentials": "true"
         }
     )

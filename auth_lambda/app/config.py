@@ -9,7 +9,6 @@ USERS_TABLE = os.environ["USERS_TABLE"]
 DOCTORS_TABLE = os.environ["DOCTORS_TABLE"]
 AUTH_TABLE = os.environ["AUTH_TABLE"]
 AUTH_TOKENS_TABLE = os.environ["AUTH_TOKENS_TABLE"]
-SESSIONS_TABLE = os.environ.get("SESSIONS_TABLE", "SessionsTable")
 
 BREVO_SMTP_USER = os.environ["BREVO_SMTP_USER"]
 BREVO_SMTP_KEY = os.environ["BREVO_SMTP_KEY"]
@@ -24,29 +23,11 @@ JWT_EXP_MINUTES = int(os.environ.get("JWT_EXP_MINUTES", "1440"))
 JWT_ALGORITHM = os.environ.get("JWT_ALGORITHM", "HS256")
 
 # Rate limiting defaults (all values are seconds/attempts)
-EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS = int(
-    os.environ.get("EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS", "5")
-)
-EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS = int(
-    os.environ.get("EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS", str(60 * 60))
-)
 MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS = int(
     os.environ.get("MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS", "5")
 )
 MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS = int(
     os.environ.get("MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS", str(15 * 60))
-)
-PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS = int(
-    os.environ.get("PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS", "3")
-)
-PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS = int(
-    os.environ.get("PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS", str(60 * 60))
-)
-PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS = int(
-    os.environ.get("PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS", "3")
-)
-PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS = int(
-    os.environ.get("PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS", str(15 * 60))
 )
 
 # Google client IDs list (kept same approach as your original)
@@ -66,7 +47,6 @@ users_table = dynamodb.Table(USERS_TABLE)
 doctors_table = dynamodb.Table(DOCTORS_TABLE)
 auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
-sessions_table = dynamodb.Table(SESSIONS_TABLE)
 
 # Additional tables for account deletion
 booking_table = dynamodb.Table("DoctorBookingsTable")

@@ -1,5 +1,4 @@
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import JSONResponse
 from app.utils import s3_utils
 from app.utils import prescription_utils
 from app.models.schemas import UploadRequest, UserRequest, FileRequest, PrescriptionRequest
@@ -13,13 +12,7 @@ router = APIRouter(prefix="/medilocker", tags=["Medilocker"])
 async def upload_file(body: UploadRequest):
     try:
         s3_utils.upload_files(body.user_id, body.files)
-        return JSONResponse(
-            content={"message": "Files uploaded successfully"},
-            headers={
-                "Access-Control-Allow-Origin": "https://kokoro.doctor",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+        return {"message": "Files uploaded successfully"}
     except Exception as e:
         logger.exception("Upload failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -29,20 +22,8 @@ async def fetch_files(body: UserRequest):
     try:
         files_info = s3_utils.fetch_files(body.user_id)
         if not files_info:
-            return JSONResponse(
-                content={"message": "No files found", "files": []},
-                headers={
-                    "Access-Control-Allow-Origin": "https://kokoro.doctor",
-                    "Access-Control-Allow-Credentials": "true"
-                }
-            )
-        return JSONResponse(
-            content={"files": files_info},
-            headers={
-                "Access-Control-Allow-Origin": "https://kokoro.doctor",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+            return {"message": "No files found", "files": []}
+        return {"files": files_info}
     except Exception as e:
         logger.exception("Fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -51,13 +32,7 @@ async def fetch_files(body: UserRequest):
 async def generate_download_link(body: FileRequest):
     try:
         url = s3_utils.generate_download_link(body.user_id, body.filename)
-        return JSONResponse(
-            content={"download_url": url},
-            headers={
-                "Access-Control-Allow-Origin": "https://kokoro.doctor",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+        return {"download_url": url}
     except Exception as e:
         logger.exception("Presigned URL generation failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -66,13 +41,7 @@ async def generate_download_link(body: FileRequest):
 async def delete_file(body: FileRequest):
     try:
         s3_utils.delete_file(body.user_id, body.filename)
-        return JSONResponse(
-            content={"message": "File deleted successfully"},
-            headers={
-                "Access-Control-Allow-Origin": "https://kokoro.doctor",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+        return {"message": "File deleted successfully"}
     except Exception as e:
         logger.exception("Deletion failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -98,16 +67,10 @@ async def generate_prescription(body: PrescriptionRequest):
             body.patient_symptoms
         )
         
-        return JSONResponse(
-            content={
-                "prescription": prescription,
-                "message": "Prescription generated successfully"
-            },
-            headers={
-                "Access-Control-Allow-Origin": "https://kokoro.doctor",
-                "Access-Control-Allow-Credentials": "true"
-            }
-        )
+        return {
+            "prescription": prescription,
+            "message": "Prescription generated successfully"
+        }
     except HTTPException:
         raise
     except Exception as e:

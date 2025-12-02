@@ -18,10 +18,7 @@ logger = get_logger(__name__)
 
 
 class RateLimitAction(str, Enum):
-    EMAIL_VERIFICATION = "email_verification"
-    PASSWORD_RESET_EMAIL = "password_reset_email"
     MOBILE_OTP = "mobile_otp"
-    PASSWORD_RESET_PHONE = "password_reset_phone"
 
 
 @dataclass(frozen=True)
@@ -35,33 +32,12 @@ class RateLimitRule:
 
 def _build_rules() -> Dict[RateLimitAction, RateLimitRule]:
     return {
-        RateLimitAction.EMAIL_VERIFICATION: RateLimitRule(
-            identifier_attr="email",
-            window_seconds=config.EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
-            max_attempts=config.EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS,
-            purpose="rate_limit#email_verification",
-            error_detail="Too many verification emails requested. Please try again later.",
-        ),
-        RateLimitAction.PASSWORD_RESET_EMAIL: RateLimitRule(
-            identifier_attr="email",
-            window_seconds=config.PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS,
-            max_attempts=config.PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS,
-            purpose="rate_limit#password_reset_email",
-            error_detail="Too many password reset emails requested. Please try again later.",
-        ),
         RateLimitAction.MOBILE_OTP: RateLimitRule(
             identifier_attr="phoneNumber",
             window_seconds=config.MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS,
             max_attempts=config.MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS,
             purpose="rate_limit#mobile_otp",
             error_detail="Too many OTP requests. Please wait before trying again.",
-        ),
-        RateLimitAction.PASSWORD_RESET_PHONE: RateLimitRule(
-            identifier_attr="phoneNumber",
-            window_seconds=config.PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS,
-            max_attempts=config.PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS,
-            purpose="rate_limit#password_reset_phone",
-            error_detail="Too many password reset OTP requests. Please wait before trying again.",
         ),
     }
 

@@ -25,7 +25,7 @@ from app.utils.tokens import generate_token_id, ttl_minutes_from_now
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/auth", tags=["passwordless-auth"])
+router = APIRouter(prefix="/auth", tags=["otp-auth"])
 
 LOGIN_OTP_PURPOSE = "login_otp"
 SIGNUP_OTP_PURPOSE = "signup_otp"
@@ -72,10 +72,8 @@ def _otp_send_failure() -> HTTPException:
 
 
 def _login_discovery_response(role: str) -> dict:
-    """Passwordless login discovery - always returns OTP required."""
     return {
         "role": role,
-        "has_password": False,
         "message": "OTP required to continue."
     }
 
@@ -216,7 +214,6 @@ def request_doctor_signup_otp(data: schemas.SignupOtpRequest):
 
 @router.post("/request-otp")
 def request_otp(data: schemas.LoginOtpRequest):
-    """Request OTP for passwordless login."""
     normalized_phone = normalize_phone_number(data.phoneNumber)
     if not normalized_phone:
         raise HTTPException(status_code=400, detail="Invalid phone number")
@@ -258,7 +255,6 @@ def verify_signup_otp(data: schemas.SignupOtpVerify):
 
 @router.post("/login")
 def login(data: schemas.LoginRequest):
-    """Passwordless login - OTP only."""
     normalized_phone = normalize_phone_number(data.phoneNumber)
     if not normalized_phone:
         raise HTTPException(status_code=400, detail="Invalid phone number")
@@ -273,11 +269,9 @@ def login(data: schemas.LoginRequest):
     if not role:
         raise HTTPException(status_code=400, detail="Account role missing. Please contact support.")
 
-    # If no OTP provided, return discovery response
     if not data.otp:
         return _login_discovery_response(role)
 
-    # Verify OTP and login
     otp = data.otp.strip()
     if not otp:
         raise HTTPException(status_code=400, detail="OTP cannot be empty.")

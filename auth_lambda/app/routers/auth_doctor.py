@@ -22,7 +22,6 @@ router = APIRouter(prefix="/auth", tags=["doctor-auth"])
 
 @router.post("/doctor/signup")
 def doctor_signup(data: schemas.DoctorProfileCreate):
-    """Passwordless doctor signup - OTP verification only."""
     try:
         normalized_phone = normalize_phone_number(data.phoneNumber)
         if not normalized_phone:
@@ -62,7 +61,6 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
                 "role": "doctor",
                 "doctor_id": doctor_id,
                 "user_id": None,
-                "has_password": False,
                 "is_verified": True,
                 "last_login": now_iso,
                 "updated_at": now_iso
@@ -84,7 +82,7 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
             doctor_id=doctor_id
         )
 
-        logger.info("[DoctorSignup] Created doctor %s (passwordless)", doctor_id)
+        logger.info("[DoctorSignup] Created doctor %s", doctor_id)
         return {
             "message": "Doctor profile created successfully.",
             "access_token": access_token,

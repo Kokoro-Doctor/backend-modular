@@ -117,19 +117,6 @@ def get_user_by_id(user_id: str):
         logger.error(f"[get_user_by_id] Error getting user by id {user_id}: {e}")
         return None
 
-def get_doctor_by_email(email: str):
-    """Get doctor by email using GSI"""
-    try:
-        response = config.doctors_table.query(
-            IndexName="email-index",
-            KeyConditionExpression=Key("email").eq(email)
-        )
-        items = response.get("Items", [])
-        return items[0] if items else None
-    except Exception as e:
-        logger.error(f"[get_doctor_by_email] Error querying doctor by email {email}: {e}")
-        return None
-
 def get_doctor_by_phone(phoneNumber: str):
     """Get doctor by phone number using GSI. Phone number is normalized before lookup."""
     try:
@@ -151,19 +138,6 @@ def get_doctor_by_id(doctor_id: str):
         return response.get("Item")
     except Exception as e:
         logger.error(f"[get_doctor_by_id] Error getting doctor by id {doctor_id}: {e}")
-        return None
-
-def get_auth_token_by_email(email: str, purpose: str):
-    """Get auth token by email and purpose using GSI"""
-    try:
-        response = config.auth_tokens_table.query(
-            IndexName="email-index",
-            KeyConditionExpression=Key("email").eq(email) & Key("purpose").eq(purpose)
-        )
-        items = response.get("Items", [])
-        return items[0] if items else None
-    except Exception as e:
-        logger.error(f"[get_auth_token_by_email] Error querying token by email {email}: {e}")
         return None
 
 def get_auth_token_by_phone(phoneNumber: str, purpose: str):
@@ -257,13 +231,6 @@ def ensure_auth_record(phoneNumber: str) -> Dict[str, Any]:
 
     existing = get_auth_record(normalized)
     if existing:
-        if "has_password" not in existing:
-            try:
-                updated = update_auth_record(normalized, {"has_password": False})
-                if updated:
-                    return updated
-            except Exception:
-                logger.warning("[ensure_auth_record] Failed to backfill has_password for %s", normalized)
         return existing
 
     now = datetime.now(timezone.utc).isoformat()
@@ -273,7 +240,6 @@ def ensure_auth_record(phoneNumber: str) -> Dict[str, Any]:
         "is_verified": False,
         "user_id": None,
         "doctor_id": None,
-        "has_password": False,
         "created_at": now,
         "updated_at": now,
         "last_login": None,
@@ -281,32 +247,4 @@ def ensure_auth_record(phoneNumber: str) -> Dict[str, Any]:
     }
     put_auth_record(record)
     return record
-
-def find_user_by_email_or_phone(email: str = None, phoneNumber: str = None):
-    """Find user by email or phone number. Phone numbers are normalized before lookup."""
-    if email:
-        user = get_user_by_email(email)
-        if user:
-            return user
-    if phoneNumber:
-        # Normalize phone number before lookup
-        normalized_phone = normalize_phone_number(phoneNumber)
-        user = get_user_by_phone(normalized_phone)
-        if user:
-            return user
-    return None
-
-def find_doctor_by_email_or_phone(email: str = None, phoneNumber: str = None):
-    """Find doctor by email or phone number. Phone numbers are normalized before lookup."""
-    if email:
-        doctor = get_doctor_by_email(email)
-        if doctor:
-            return doctor
-    if phoneNumber:
-        # Normalize phone number before lookup
-        normalized_phone = normalize_phone_number(phoneNumber)
-        doctor = get_doctor_by_phone(normalized_phone)
-        if doctor:
-            return doctor
-    return None
 
