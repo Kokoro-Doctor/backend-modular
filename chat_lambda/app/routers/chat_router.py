@@ -12,9 +12,9 @@ async def chat(request: ChatRequest):
     if not request.message.strip():
         raise HTTPException(status_code=400, detail="Message is required")
 
-    identifier = request.user_id or request.session_id
+    identifier = request.user_id or request.session_id or request.doctor_id
     if not identifier:
-        raise HTTPException(status_code=400, detail="Either user_id or session_id required")
+        raise HTTPException(status_code=400, detail="Either user_id, session_id, or doctor_id required")
 
     history = get_chat_history(identifier)
 
