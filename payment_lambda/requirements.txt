@@ -1,0 +1,7 @@
+fastapi
+mangum
+boto3
+pydantic
+razorpay
+colorlog
+uvicorn

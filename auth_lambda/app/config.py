@@ -49,7 +49,7 @@ auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
 
 # Additional tables for account deletion
-booking_table = dynamodb.Table("DoctorBookingsTable")
+appointments_table = dynamodb.Table("AppointmentsTable")
 availability_table = dynamodb.Table("DoctorAvailabilityTable")
 chat_table = dynamodb.Table("ChatHistory")
 payments_table = dynamodb.Table("PaymentsTable")

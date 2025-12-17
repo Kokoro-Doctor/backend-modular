@@ -6,8 +6,9 @@ from fastapi import APIRouter, HTTPException, Header
 from app import config
 from app.logger import get_logger
 from app.models import schemas
-from app.utils.delete_account_utils import delete_user_account, delete_doctor_account
-from app.utils.db_utils import get_user_by_phone, get_doctor_by_phone
+from app.services.account_service import delete_user_account, delete_doctor_account
+from app.services.user_service import get_user_by_phone
+from app.services.doctor_service import get_doctor_by_phone
 
 logger = get_logger(__name__)
 

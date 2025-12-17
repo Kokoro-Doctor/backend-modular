@@ -23,10 +23,6 @@ class DoctorProfileUpdate(BaseModel):
 class FetchDoctorsRequest(BaseModel):
     category: Optional[str] = None
 
-class SubscribeRequest(BaseModel):
-    user_id: str
-    doctor_id: str
-
 class AvailabilitySlot(BaseModel):
     start: str
     end: str

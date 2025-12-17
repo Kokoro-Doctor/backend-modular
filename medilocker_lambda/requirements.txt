@@ -4,6 +4,3 @@ boto3
 pydantic
 colorlog
 openai
-PyPDF2
-Pillow
-pytesseract

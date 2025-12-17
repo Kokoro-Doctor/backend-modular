@@ -1,26 +1,35 @@
-from fastapi import APIRouter, HTTPException
-from app.utils import s3_utils
-from app.utils import prescription_utils
-from app.models.schemas import UploadRequest, UserRequest, FileRequest, PrescriptionRequest
+"""
+Medilocker router - thin wrapper around file and prescription services.
+"""
+from fastapi import APIRouter, HTTPException, Query, Path
+from app.services import file_service
+from app.services import prescription_service
+from app.models.schemas import UploadRequest, ExtractionRequest
 from app.logger import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/medilocker", tags=["Medilocker"])
 
+
 @router.post("/upload")
 async def upload_file(body: UploadRequest):
     try:
-        s3_utils.upload_files(body.user_id, body.files)
+        file_service.upload_files(body.user_id, body.files)
         return {"message": "Files uploaded successfully"}
     except Exception as e:
         logger.exception("Upload failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/fetch")
-async def fetch_files(body: UserRequest):
+
+@router.get("/users/{user_id}/files")
+async def fetch_files(user_id: str = Path(..., description="User ID")):
+    """
+    List all files for a user.
+    Resource identifier (user_id) is in the path.
+    """
     try:
-        files_info = s3_utils.fetch_files(body.user_id)
+        files_info = file_service.fetch_files(user_id)
         if not files_info:
             return {"message": "No files found", "files": []}
         return {"files": files_info}
@@ -28,51 +37,93 @@ async def fetch_files(body: UserRequest):
         logger.exception("Fetch failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/download")
-async def generate_download_link(body: FileRequest):
+
+@router.get("/users/{user_id}/files/{filename:path}/download")
+async def generate_download_link(
+    user_id: str = Path(..., description="User ID"),
+    filename: str = Path(..., description="Filename")
+):
+    """
+    Generate presigned download URL for a file.
+    Resource identifiers (user_id, filename) are in the path.
+    """
     try:
-        url = s3_utils.generate_download_link(body.user_id, body.filename)
+        url = file_service.generate_download_link(user_id, filename)
         return {"download_url": url}
     except Exception as e:
         logger.exception("Presigned URL generation failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/delete")
-async def delete_file(body: FileRequest):
+
+@router.delete("/users/{user_id}/files/{filename:path}")
+async def delete_file(
+    user_id: str = Path(..., description="User ID"),
+    filename: str = Path(..., description="Filename")
+):
+    """
+    Delete a file from user's medilocker.
+    Resource identifiers (user_id, filename) are in the path.
+    """
     try:
-        s3_utils.delete_file(body.user_id, body.filename)
+        file_service.delete_file(user_id, filename)
         return {"message": "File deleted successfully"}
     except Exception as e:
         logger.exception("Deletion failed")
         raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/generate-prescription")
-async def generate_prescription(body: PrescriptionRequest):
+
+@router.post("/extract-structured-data")
+async def extract_structured_data(body: ExtractionRequest):
     """
-    Generate a prescription based on medical documents stored in medilocker.
-    Can optionally specify specific files or use all files for the user.
+    Extract structured prescription data from uploaded files using GPT-4 Vision.
+    Files should contain base64-encoded content.
     """
+    import time
+    start_time = time.time()
+    
     try:
-        # Extract text from documents
-        logger.info(f"Extracting text from documents for {body.user_id}")
-        document_text = prescription_utils.download_and_extract_documents(
-            body.user_id, 
-            body.filenames
+        logger.info("=" * 80)
+        logger.info("📥 [EXTRACT] Request received for structured data extraction")
+        logger.info(f"📥 [EXTRACT] Number of files: {len(body.files)}")
+        logger.info(f"📥 [EXTRACT] Has frontend_patient_details: {body.frontend_patient_details is not None}")
+        
+        # Log file information (without exposing full base64 content)
+        for idx, file in enumerate(body.files):
+            content_length = len(file.content) if file.content else 0
+            content_preview = file.content[:50] + "..." if file.content and len(file.content) > 50 else (file.content or "empty")
+            logger.info(f"📥 [EXTRACT] File {idx + 1}: filename='{file.filename}', content_length={content_length} bytes, preview='{content_preview}'")
+        
+        # Convert FileUploadModel to dict format expected by extraction function
+        files = [
+            {
+                "filename": file.filename,
+                "content": file.content
+            }
+            for file in body.files
+        ]
+        
+        logger.info(f"🔄 [EXTRACT] Starting extraction process for {len(files)} file(s)")
+        
+        result = prescription_service.extract_structured_data_from_files(
+            files,
+            body.frontend_patient_details
         )
         
-        # Generate prescription using ChatGPT
-        logger.info(f"Generating prescription for {body.user_id}")
-        prescription = prescription_utils.generate_prescription(
-            document_text,
-            body.patient_symptoms
-        )
+        elapsed_time = time.time() - start_time
+        logger.info(f"✅ [EXTRACT] Extraction completed successfully in {elapsed_time:.2f} seconds")
+        logger.info(f"✅ [EXTRACT] Result summary: has_patient_details={bool(result.get('patient_details'))}, has_prescription_report={bool(result.get('prescription_report'))}")
+        logger.info(f"✅ [EXTRACT] Prescription report length: {len(result.get('prescription_report', ''))} characters")
+        logger.info("=" * 80)
         
-        return {
-            "prescription": prescription,
-            "message": "Prescription generated successfully"
-        }
-    except HTTPException:
+        return result
+    except HTTPException as http_exc:
+        elapsed_time = time.time() - start_time
+        logger.error(f"❌ [EXTRACT] HTTP Exception after {elapsed_time:.2f} seconds: status={http_exc.status_code}, detail={http_exc.detail}")
+        logger.info("=" * 80)
         raise
     except Exception as e:
-        logger.exception("Prescription generation failed")
+        elapsed_time = time.time() - start_time
+        logger.error(f"❌ [EXTRACT] Unexpected error after {elapsed_time:.2f} seconds: {type(e).__name__}: {str(e)}")
+        logger.exception("❌ [EXTRACT] Full exception traceback:")
+        logger.info("=" * 80)
         raise HTTPException(status_code=500, detail=str(e))

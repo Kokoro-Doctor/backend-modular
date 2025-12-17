@@ -1,18 +1,19 @@
-from fastapi import APIRouter, HTTPException
-from app.models.schemas import FetchDoctorsRequest
-from app.utils.s3_utils import generate_presigned_url
+from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
+from app.services.document_service import generate_presigned_url
+from app.services.doctor_service import get_doctor
 from app.utils.error_utils import handle_exception
 from app.config import DOCTORS_TABLE, S3_BUCKET
 from boto3.dynamodb.conditions import Attr
 
 router = APIRouter(prefix="/doctorsService", tags=["Fetch Doctors"])
 
-@router.post("/fetchDoctors")
-def fetch_doctors(request: FetchDoctorsRequest):
+@router.get("/doctors")
+def fetch_doctors(category: Optional[str] = Query(None, description="Filter by category")):
     try:
         response = (
-            DOCTORS_TABLE.scan(FilterExpression=Attr("category").eq(request.category))
-            if request.category else DOCTORS_TABLE.scan()
+            DOCTORS_TABLE.scan(FilterExpression=Attr("category").eq(category))
+            if category else DOCTORS_TABLE.scan()
         )
         doctors = response.get("Items", [])
         for doc in doctors:
@@ -30,3 +31,26 @@ def fetch_doctors(request: FetchDoctorsRequest):
         return {"doctors": doctors}
     except Exception as e:
         handle_exception(e, "Fetch doctors")
+
+@router.get("/doctor/{doctor_id}")
+def get_doctor_by_id(doctor_id: str):
+    """Get a single doctor by doctor_id"""
+    try:
+        doctor = get_doctor(doctor_id)
+        
+        # Generate presigned URLs for S3 fields
+        for field in ["profilePhoto", "degreeCertificate", "govtIdProof"]:
+            if field in doctor and doctor[field]:
+                url = doctor[field]
+                # Extract key from S3 URL
+                if "s3.amazonaws.com/" in url:
+                    key = url.split("s3.amazonaws.com/", 1)[1]
+                else:
+                    key = url
+                doctor[field] = generate_presigned_url(key)
+        
+        return {"doctor": doctor}
+    except HTTPException:
+        raise
+    except Exception as e:
+        handle_exception(e, "Get doctor by ID")
