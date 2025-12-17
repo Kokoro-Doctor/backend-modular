@@ -20,7 +20,7 @@ table = dynamodb.Table(table_name)
 
 # CORS Headers
 HEADERS = {
-    "Access-Control-Allow-Origin": "https://kokoro.doctor",
+    "Access-Control-Allow-Origin": "https://kokoro.doctor, http://metafied.co/",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type"
 }

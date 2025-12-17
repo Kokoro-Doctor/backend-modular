@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException
 from app.models.schemas import DoctorProfileUpdate
-from app.utils.s3_utils import upload_doc_to_s3
+from app.services.document_service import upload_doc_to_s3
 from app.utils.error_utils import handle_exception
 from app.config import DOCTORS_TABLE
 from app.logger import get_logger

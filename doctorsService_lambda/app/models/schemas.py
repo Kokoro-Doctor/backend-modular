@@ -23,10 +23,6 @@ class DoctorProfileUpdate(BaseModel):
 class FetchDoctorsRequest(BaseModel):
     category: Optional[str] = None
 
-class SubscribeRequest(BaseModel):
-    user_id: str
-    doctor_id: str
-
 class AvailabilitySlot(BaseModel):
     start: str
     end: str
@@ -42,11 +38,11 @@ class WeekDay(str, Enum):
 
 class DoctorSlotsSetRequest(BaseModel):
     doctor_id: str
-    day: WeekDay
+    date: str  # YYYY-MM-DD format
     slots: List[AvailabilitySlot]
 
 class DoctorSlotUpdateRequest(BaseModel):
     doctor_id: str
-    day: WeekDay
-    slot: AvailabilitySlot
+    date: str  # YYYY-MM-DD format
+    slot_time: str  # HH:MM format (e.g., "10:00")
     available: Optional[bool] = True

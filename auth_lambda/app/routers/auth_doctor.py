@@ -1,20 +1,24 @@
+"""
+Doctor auth router - thin wrapper around doctor and auth services.
+"""
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
-from app import config
 from app.logger import get_logger
 from app.models import schemas
-from app.routers.auth_common import SIGNUP_OTP_PURPOSE, validate_otp
-from app.utils.db_utils import (
-    ensure_auth_record,
-    generate_doctor_id,
+from app.services.auth_service import SIGNUP_OTP_PURPOSE, validate_otp
+from app.services.doctor_service import (
+    create_doctor_profile,
     get_doctor_by_phone,
-    normalize_phone_number,
+    build_doctor_payload,
+)
+from app.services.auth_service import (
+    ensure_auth_record,
     update_auth_record,
 )
+from app.utils.db_utils import normalize_phone_number
 from app.utils.jwt_utils import create_jwt
-from app.utils.security import hash_password
 
 logger = get_logger(__name__)
 
@@ -37,58 +41,38 @@ def doctor_signup(data: schemas.DoctorProfileCreate):
 
         ensure_auth_record(normalized_phone)
 
-        doctor_id = generate_doctor_id()
+        doctor_item = create_doctor_profile(
+            {
+                "name": data.name,
+                "specialization": data.specialization,
+                "experience": data.experience,
+                "email": data.email
+            },
+            normalized_phone
+        )
+
         now_iso = datetime.now(timezone.utc).isoformat()
-        password = data.password.strip()
-        if not password:
-            raise HTTPException(status_code=400, detail="Password cannot be empty.")
-
-        doctor_item = {
-            "doctor_id": doctor_id,
-            "name": data.name.strip(),
-            "phoneNumber": normalized_phone,
-            "createdAt": now_iso,
-            "passwordHash": hash_password(password),
-        }
-
-        if data.specialization:
-            doctor_item["specialization"] = data.specialization
-        if data.experience is not None:
-            doctor_item["experience"] = data.experience
-        if data.email:
-            doctor_item["email"] = data.email.lower()
-
-        config.doctors_table.put_item(Item=doctor_item)
-
         update_auth_record(
             normalized_phone,
             {
                 "role": "doctor",
-                "doctor_id": doctor_id,
+                "doctor_id": doctor_item["doctor_id"],
                 "user_id": None,
-                "has_password": True,
                 "is_verified": True,
                 "last_login": now_iso,
                 "updated_at": now_iso
             }
         )
 
-        profile = {
-            "doctor_id": doctor_id,
-            "name": doctor_item["name"],
-            "phoneNumber": normalized_phone,
-            "email": doctor_item.get("email"),
-            "specialization": doctor_item.get("specialization"),
-            "experience": doctor_item.get("experience")
-        }
+        profile = build_doctor_payload(doctor_item)
 
         access_token = create_jwt(
             phone_number=normalized_phone,
             role="doctor",
-            doctor_id=doctor_id
+            doctor_id=doctor_item["doctor_id"]
         )
 
-        logger.info("[DoctorSignup] Created doctor %s", doctor_id)
+        logger.info("[DoctorSignup] Created doctor %s", doctor_item["doctor_id"])
         return {
             "message": "Doctor profile created successfully.",
             "access_token": access_token,

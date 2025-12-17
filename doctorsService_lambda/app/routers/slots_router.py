@@ -1,35 +1,25 @@
-from fastapi import APIRouter, HTTPException
+"""
+Slots router - thin wrapper around slots service.
+"""
+from fastapi import APIRouter
 from app.models.schemas import DoctorSlotsSetRequest, DoctorSlotUpdateRequest
+from app.services.slots_service import set_availability, update_slot
 from app.utils.error_utils import handle_exception
-from app.config import DOCTORS_TABLE, AVAILABILITY_TABLE
-from app.logger import get_logger
-
-logger = get_logger(__name__)
 
 router = APIRouter(prefix="/doctorsService", tags=["Slots"])
 
+
 @router.post("/setSlots")
-def set_availability(data: DoctorSlotsSetRequest):
+def set_availability_endpoint(data: DoctorSlotsSetRequest):
     try:
-        doctor = DOCTORS_TABLE.get_item(Key={"email": data.doctor_id})
-        if "Item" not in doctor:
-            raise HTTPException(status_code=404, detail="Doctor not found")
-
-        pk = f"{data.doctor_id}#{data.day.value}"
-        for slot in data.slots:
-            sk = f"{slot.start}-{slot.end}"
-            AVAILABILITY_TABLE.put_item(Item={"PK": pk, "SK": sk, "available": True})
-
-        return {"message": f"Availability for {data.day.value} set successfully."}
+        return set_availability(data.doctor_id, data.date, data.slots)
     except Exception as e:
         handle_exception(e, "Set availability")
 
+
 @router.post("/updateSlot")
-def update_slot(data: DoctorSlotUpdateRequest):
+def update_slot_endpoint(data: DoctorSlotUpdateRequest):
     try:
-        pk = f"{data.doctor_id}#{data.day.value}"
-        sk = f"{data.slot.start}-{data.slot.end}"
-        AVAILABILITY_TABLE.put_item(Item={"PK": pk, "SK": sk, "available": data.available})
-        return {"message": f"Slot {'enabled' if data.available else 'disabled'} successfully"}
+        return update_slot(data.doctor_id, data.date, data.slot_time, data.available)
     except Exception as e:
         handle_exception(e, "Update slot")

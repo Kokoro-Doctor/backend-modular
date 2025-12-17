@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Any
 
 class FileUploadModel(BaseModel):
     filename: str
@@ -17,7 +17,6 @@ class FileRequest(BaseModel):
     user_id: str
     filename: str
 
-class PrescriptionRequest(BaseModel):
-    user_id: str
-    filenames: Optional[List[str]] = None  # If None, use all files
-    patient_symptoms: Optional[str] = None  # Optional additional context
+class ExtractionRequest(BaseModel):
+    files: List[FileUploadModel]  # Files with base64 content
+    frontend_patient_details: Optional[Dict[str, Any]] = None  # Optional patient details from frontend

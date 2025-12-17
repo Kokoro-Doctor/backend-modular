@@ -7,12 +7,11 @@ from google.oauth2 import id_token
 from app import config
 from app.logger import get_logger
 from app.utils.db_utils import (
-    ensure_auth_record,
     generate_user_id,
-    get_user_by_email,
     normalize_phone_number,
-    update_auth_record,
 )
+from app.services.user_service import get_user_by_email
+from app.services.auth_service import ensure_auth_record, update_auth_record
 from app.utils.jwt_utils import create_jwt
 
 logger = get_logger(__name__)

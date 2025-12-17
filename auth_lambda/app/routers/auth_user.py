@@ -1,20 +1,25 @@
+"""
+User auth router - thin wrapper around user and auth services.
+"""
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException
 
-from app import config
 from app.logger import get_logger
 from app.models import schemas
-from app.routers.auth_common import SIGNUP_OTP_PURPOSE, validate_otp
-from app.utils.db_utils import (
-    ensure_auth_record,
-    generate_user_id,
+from app.services.auth_service import SIGNUP_OTP_PURPOSE, validate_otp
+from app.services.user_service import (
+    create_user_profile,
     get_user_by_phone,
-    normalize_phone_number,
+    get_user_by_id,
+    build_user_payload,
+)
+from app.services.auth_service import (
+    ensure_auth_record,
     update_auth_record,
 )
+from app.utils.db_utils import normalize_phone_number
 from app.utils.jwt_utils import create_jwt
-from app.utils.security import hash_password
 
 logger = get_logger(__name__)
 
@@ -37,52 +42,33 @@ def user_signup(data: schemas.UserProfileCreate):
 
         ensure_auth_record(normalized_phone)
 
-        user_id = generate_user_id()
+        user_item = create_user_profile(
+            {"name": data.name, "email": data.email},
+            normalized_phone
+        )
+
         now_iso = datetime.now(timezone.utc).isoformat()
-        password = data.password.strip()
-        if not password:
-            raise HTTPException(status_code=400, detail="Password cannot be empty.")
-
-        user_item = {
-            "user_id": user_id,
-            "name": data.name.strip(),
-            "phoneNumber": normalized_phone,
-            "createdAt": now_iso,
-            "passwordHash": hash_password(password),
-        }
-
-        if data.email:
-            user_item["email"] = data.email.lower()
-
-        config.users_table.put_item(Item=user_item)
-
         update_auth_record(
             normalized_phone,
             {
                 "role": "user",
-                "user_id": user_id,
+                "user_id": user_item["user_id"],
                 "doctor_id": None,
-                "has_password": True,
                 "is_verified": True,
                 "last_login": now_iso,
                 "updated_at": now_iso
             }
         )
 
-        profile = {
-            "user_id": user_id,
-            "name": user_item["name"],
-            "phoneNumber": normalized_phone,
-            "email": user_item.get("email"),
-        }
+        profile = build_user_payload(user_item)
 
         access_token = create_jwt(
             phone_number=normalized_phone,
             role="user",
-            user_id=user_id
+            user_id=user_item["user_id"]
         )
 
-        logger.info("[UserSignup] Created user %s", user_id)
+        logger.info("[UserSignup] Created user %s", user_item["user_id"])
         return {
             "message": "User profile created successfully.",
             "access_token": access_token,
@@ -93,4 +79,22 @@ def user_signup(data: schemas.UserProfileCreate):
         raise
     except Exception as exc:
         logger.exception("[UserSignup] Unexpected error")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/user/{user_id}")
+def get_user(user_id: str):
+    """Get a single user by user_id"""
+    try:
+        user = get_user_by_id(user_id)
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        profile = build_user_payload(user)
+        logger.info("[GetUser] Retrieved user %s", user_id)
+        return {"user": profile}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception("[GetUser] Unexpected error")
         raise HTTPException(status_code=500, detail=str(exc))

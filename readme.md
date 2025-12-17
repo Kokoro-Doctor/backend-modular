@@ -57,18 +57,21 @@ Base path: `/doctorsService`
 
 - `POST /doctorsService/updateProfile` – Complete or update doctor onboarding metadata and documents
 - `POST /doctorsService/fetchDoctors` – Retrieve doctors, optionally filtered by category, with signed media URLs
-- `POST /doctorsService/subscribe` – Subscribe a user to a doctor (mirrors relationship on both records)
 - `POST /doctorsService/setSlots` – Bulk-create availability slots for a specific weekday
 - `POST /doctorsService/updateSlot` – Toggle availability for a single slot
 
-### 3. Booking Service (`doctorBookings_lambda`)
+> **Note:** Subscriptions are managed via the Booking Lambda (`/booking/subscriptions`) and are created automatically after successful payment. See Subscription System documentation.
 
-Base path: `/doctorBookings`
+### 3. Appointment Service (`appointmentService_lambda`)
 
-- `POST /doctorBookings/book` – Book a slot (enforces capacity & unique reservations via DynamoDB)
-- `POST /doctorBookings/cancel` – Cancel an existing booking and free the slot
-- `POST /doctorBookings/available` – List available slots for a doctor on a specific date
-- `POST /doctorBookings/fetchBookings` – Fetch bookings for a doctor (`type=doctor, id=email, days`) or user (`type=user`)
+Base path: `/appointmentService`
+
+- `POST /appointmentService/bookings` – Book a slot atomically (enforces capacity & unique reservations via DynamoDB)
+- `DELETE /appointmentService/bookings/{booking_id}` – Cancel an existing booking and free the slot
+- `GET /appointmentService/doctors/{doctor_id}/availability?date=YYYY-MM-DD` – List available slots for a doctor on a specific date
+- `GET /appointmentService/doctors/{doctor_id}/bookings?date=YYYY-MM-DD` – Fetch bookings for a doctor
+- `GET /appointmentService/users/{user_id}/bookings?type=upcoming|past` – Fetch bookings for a user
+- `GET /appointmentService/doctors/{doctor_id}/calendar?days=N` – Get unified calendar for a doctor
 
 > ⏱️ Slots are 30 minutes, bookable up to 15 days ahead, capped at five patients per slot.
 
@@ -113,23 +116,33 @@ Set the following variables for each Lambda before deployment (SAM templates wir
 
 ## 🗃️ DynamoDB Tables
 
-| Table                     | Purpose                                  |
-| ------------------------- | ---------------------------------------- |
-| `Users`                   | User login data, subscriptions           |
-| `Doctors`                 | Doctor data and onboarding status        |
-| `DoctorAvailabilityTable` | Stores time slots per doctor per weekday |
-| `DoctorBookingsTable`     | Stores user bookings (PK/SK + GSI)       |
-| `ChatHistory`             | Stores user chat logs with timestamps    |
-| `PaymentsTable`           | Stores Razorpay payment info             |
+| Table                     | Purpose                                                                   |
+| ------------------------- | ------------------------------------------------------------------------- |
+| `Users`                   | User login data, subscriptions                                            |
+| `Doctors`                 | Doctor data and onboarding status                                         |
+| `DoctorAvailabilityTable` | Stores time slots per doctor per date (PK: doctor_id, SK: date#slot_time) |
+| `AppointmentsTable`       | Stores user bookings (PK/SK + GSI)                                        |
+| `ChatHistory`             | Stores user chat logs with timestamps                                     |
+| `PaymentsTable`           | Stores Razorpay payment info                                              |
 
 ### 🧠 Bookings Table Schema
 
-| Field     | Format                           |
-| --------- | -------------------------------- |
-| `PK`      | `doctor_id#YYYY-MM-DD`           |
-| `SK`      | `HH:MM#user_id`                  |
-| `user_id` | Used for GSI: `GSI_UserBookings` |
-| `ttl`     | Epoch timestamp (7-day expiry)   |
+| Field        | Format                               |
+| ------------ | ------------------------------------ |
+| `PK`         | `doctor_id`                          |
+| `SK`         | `YYYY-MM-DD#HH:MM` (date#start_time) |
+| `doctor_id`  | Doctor identifier                    |
+| `date`       | Date in YYYY-MM-DD format            |
+| `start_time` | Time in HH:MM format                 |
+| `user_id`    | User identifier                      |
+| `booking_id` | Unique booking identifier            |
+| `created_at` | ISO timestamp                        |
+| `status`     | Optional booking status              |
+
+**GSI_UserBookings:**
+
+- `GSI1PK` (Partition Key): `user_id`
+- `GSI1SK` (Sort Key): `SK` (contains `date#start_time`)
 
 ---
 
