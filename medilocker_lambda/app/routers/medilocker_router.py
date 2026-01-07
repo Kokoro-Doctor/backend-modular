@@ -75,23 +75,15 @@ async def delete_file(
 @router.post("/extract-structured-data")
 async def extract_structured_data(body: ExtractionRequest):
     """
-    Extract structured prescription data from uploaded files using GPT-4 Vision.
+    Extract prescription points directly from uploaded files using GPT-4 Vision.
     Files should contain base64-encoded content.
     """
     import time
     start_time = time.time()
     
     try:
-        logger.info("=" * 80)
-        logger.info("📥 [EXTRACT] Request received for structured data extraction")
-        logger.info(f"📥 [EXTRACT] Number of files: {len(body.files)}")
-        logger.info(f"📥 [EXTRACT] Has frontend_patient_details: {body.frontend_patient_details is not None}")
-        
-        # Log file information (without exposing full base64 content)
-        for idx, file in enumerate(body.files):
-            content_length = len(file.content) if file.content else 0
-            content_preview = file.content[:50] + "..." if file.content and len(file.content) > 50 else (file.content or "empty")
-            logger.info(f"📥 [EXTRACT] File {idx + 1}: filename='{file.filename}', content_length={content_length} bytes, preview='{content_preview}'")
+        logger.info(f"[EXTRACT] Request received for prescription extraction")
+        logger.info(f"[EXTRACT] Number of files: {len(body.files)}")
         
         # Convert FileUploadModel to dict format expected by extraction function
         files = [
@@ -102,28 +94,19 @@ async def extract_structured_data(body: ExtractionRequest):
             for file in body.files
         ]
         
-        logger.info(f"🔄 [EXTRACT] Starting extraction process for {len(files)} file(s)")
-        
-        result = prescription_service.extract_structured_data_from_files(
-            files,
-            body.frontend_patient_details
-        )
+        result = prescription_service.extract_structured_data_from_files(files)
         
         elapsed_time = time.time() - start_time
-        logger.info(f"✅ [EXTRACT] Extraction completed successfully in {elapsed_time:.2f} seconds")
-        logger.info(f"✅ [EXTRACT] Result summary: has_patient_details={bool(result.get('patient_details'))}, has_prescription_report={bool(result.get('prescription_report'))}")
-        logger.info(f"✅ [EXTRACT] Prescription report length: {len(result.get('prescription_report', ''))} characters")
-        logger.info("=" * 80)
+        logger.info(f"[EXTRACT] Extraction completed in {elapsed_time:.2f}s")
+        logger.info(f"[EXTRACT] Prescription length: {len(result.get('prescription', ''))} characters")
         
         return result
     except HTTPException as http_exc:
         elapsed_time = time.time() - start_time
-        logger.error(f"❌ [EXTRACT] HTTP Exception after {elapsed_time:.2f} seconds: status={http_exc.status_code}, detail={http_exc.detail}")
-        logger.info("=" * 80)
+        logger.error(f"[EXTRACT] HTTP Exception after {elapsed_time:.2f}s: status={http_exc.status_code}, detail={http_exc.detail}")
         raise
     except Exception as e:
         elapsed_time = time.time() - start_time
-        logger.error(f"❌ [EXTRACT] Unexpected error after {elapsed_time:.2f} seconds: {type(e).__name__}: {str(e)}")
-        logger.exception("❌ [EXTRACT] Full exception traceback:")
-        logger.info("=" * 80)
+        logger.error(f"[EXTRACT] Unexpected error after {elapsed_time:.2f}s: {type(e).__name__}: {str(e)}")
+        logger.exception("Full exception traceback:")
         raise HTTPException(status_code=500, detail=str(e))
