@@ -12,4 +12,3 @@ AVAILABILITY_TABLE = DYNAMODB.Table("DoctorAvailabilityTable")
 
 S3 = boto3.client("s3")
 S3_BUCKET = os.getenv("S3_BUCKET", "kokoro-doctor")
-S3_FOLDER_PREFIX = "DoctorDocuments/"  # Folder prefix within the bucket
