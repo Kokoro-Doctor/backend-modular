@@ -3,15 +3,27 @@ Payment Service - handles Razorpay payment operations
 """
 import json
 import datetime
+import hmac
+import hashlib
 from decimal import Decimal
 from typing import Optional
-from fastapi import HTTPException
+from fastapi import HTTPException, Request
 from botocore.exceptions import ClientError
 import razorpay.errors
-from app.config import razorpay_client, PAYMENTS_TABLE, SUBSCRIPTION_PLANS_TABLE, USER_DOCTOR_SUBSCRIPTIONS_TABLE, lambda_client, SUBSCRIPTION_SERVICE_LAMBDA_NAME
+from app.config import (
+    razorpay_client,
+    PAYMENTS_TABLE,
+    SUBSCRIPTION_PLANS_TABLE,
+    USER_DOCTOR_SUBSCRIPTIONS_TABLE,
+    lambda_client,
+    SUBSCRIPTION_SERVICE_LAMBDA_NAME,
+    WEBHOOK_SECRET,
+    PLATFORM_FEE_PERCENTAGE
+)
+from app.services.earnings_service import create_earnings_entry
 from boto3.dynamodb.conditions import Key
-from app.logger import get_logger
 
+from app.logger import get_logger
 logger = get_logger(__name__)
 
 
@@ -52,7 +64,7 @@ def get_subscription_by_payment_id(payment_id: str) -> Optional[dict]:
         return None
 
 
-def create_payment_link(plan_id: str) -> dict:
+def create_payment_link(plan_id: str, user_id: str = None, doctor_id: str = None) -> dict:
     """
     Create a Razorpay payment link.
     Fetches plan by plan_id from database and uses plan price from database.
@@ -91,8 +103,13 @@ def create_payment_link(plan_id: str) -> dict:
             "amount": amount_in_paise,
             "currency": "INR",
             "description": f"Payment for plan: {plan_id}",
-            "callback_url": "https://kokoro.doctor/payment-success",
-            "callback_method": "get"
+            "callback_url": "https://kokoro.doctor/patient/Doctors/DoctorsInfoWithBooking",
+            "callback_method": "get",
+            "notes": { "plan_id": plan_id,
+                        "user_id": user_id,
+                        "doctor_id": doctor_id
+
+            }
         }
         
         payment_link = razorpay_client.payment_link.create(payment_link_data)
@@ -232,6 +249,23 @@ def verify_payment(
                     # Don't fail the payment verification if subscription creation fails
                     # The subscription can be created manually later
                     subscription_message = f"Payment verified but subscription creation failed: {str(sub_error)}"
+            
+            # Create earnings ledger entry for doctor (only if doctor_id is present)
+            if doctor_id:
+                try:
+                    create_earnings_entry(
+                        doctor_id=doctor_id,
+                        user_id=user_id,
+                        subscription_id=subscription_id or "",
+                        payment_id=payment_id,
+                        gross_amount=amount_paid,
+                        platform_fee_percentage=PLATFORM_FEE_PERCENTAGE
+                    )
+                    logger.info(f"Created earnings entry for doctor {doctor_id}, payment {payment_id}")
+                except Exception as earnings_error:
+                    logger.error(f"Failed to create earnings entry: {str(earnings_error)}", exc_info=True)
+                    # Don't fail payment verification if earnings entry creation fails
+                    # Earnings can be created manually later if needed
         
         response = {
             "message": "Payment processed",
@@ -273,7 +307,7 @@ def generate_invoice_url(payment_id: str) -> str:
     """
     Generate invoice URL for a payment.
     """
-    base_url = "https://yourwebsite.com/invoices"
+    base_url = "https://kokoro.doctor/payment/invoices"
     return f"{base_url}/{payment_id}.pdf"
 
 
@@ -383,4 +417,83 @@ def create_subscription_after_payment(user_id: str, doctor_id: str, plan_id: str
     except Exception as e:
         logger.error(f"Error invoking subscription service Lambda: {str(e)}", exc_info=True)
         raise
+
+
+async def process_razorpay_webhook(request: Request) -> dict:
+    """
+    Process Razorpay webhook events.
+    Verifies the signature and handles payment.captured events.
+    
+    Args:
+        request: FastAPI Request object containing webhook payload
+        
+    Returns:
+        dict: Status response for Razorpay
+    """
+    try:
+        # 1. Get raw body and signature
+        body_bytes = await request.body()
+        signature = request.headers.get("x-razorpay-signature")
+
+        if not signature:
+            logger.warning("Webhook missing signature")
+            # Return 200 to Razorpay even on error to stop them from retrying
+            return {"status": "ignored"}
+
+        # 2. Verify Signature
+        try:
+            generated_signature = hmac.new(
+                key=WEBHOOK_SECRET.encode(),
+                msg=body_bytes,
+                digestmod=hashlib.sha256
+            ).hexdigest()
+
+            if generated_signature != signature:
+                logger.error("Invalid Webhook Signature")
+                raise HTTPException(400, "Invalid signature")
+        except Exception as e:
+            logger.error(f"Signature verification failed: {e}")
+            raise HTTPException(400, "Verification failed")
+
+        # 3. Process the Event
+        data = json.loads(body_bytes.decode('utf-8'))
+        event_type = data.get("event")
+
+        # Listen for 'payment.captured' (Works for Links, Buttons, everything)
+        if event_type == "payment.captured":
+            payment_entity = data["payload"]["payment"]["entity"]
+            
+            # Extract details from 'notes' (which we sent while creating link)
+            notes = payment_entity.get("notes", {})
+            user_id = notes.get("user_id")
+            plan_id = notes.get("plan_id")
+            doctor_id = notes.get("doctor_id") # Optional
+            
+            razorpay_payment_id = payment_entity.get("id")
+            
+            logger.info(f"🔔 Webhook received: Payment {razorpay_payment_id} captured for User {user_id}")
+
+            if user_id and plan_id:
+                # Calls the existing verify_payment logic internally
+                # This updates the database automatically
+                try:
+                    verify_payment(
+                        payment_id=razorpay_payment_id,
+                        plan_id=plan_id,
+                        user_id=user_id,
+                        doctor_id=doctor_id
+                    )
+                    logger.info(f"✅ Auto-verified payment via Webhook for User: {user_id}")
+                except Exception as e:
+                    logger.error(f"❌ Failed to process webhook db update: {e}")
+            else:
+                logger.warning("Webhook received but missing user_id or plan_id in notes")
+
+        # 4. Acknowledge Receipt (Always return 200 OK)
+        return {"status": "ok"}
+
+    except Exception as e:
+        logger.error(f"Webhook processing error: {str(e)}")
+        # We still return 200 OK to Razorpay so they don't keep retrying failed logic
+        return {"status": "error", "detail": str(e)}
 
