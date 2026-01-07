@@ -12,7 +12,6 @@ from app.utils.db_utils import (
     generate_user_id,
     normalize_phone_number,
 )
-from boto3.dynamodb.conditions import Key
 
 logger = get_logger(__name__)
 
@@ -20,9 +19,10 @@ logger = get_logger(__name__)
 def get_user_by_email(email: str):
     """Get user by email using GSI"""
     try:
+        normalized_email = email.lower().strip()
         response = config.users_table.query(
             IndexName="email-index",
-            KeyConditionExpression=Key("email").eq(email)
+            KeyConditionExpression=Key("email").eq(normalized_email)
         )
         items = response.get("Items", [])
         return items[0] if items else None
@@ -67,6 +67,10 @@ def create_user_profile(user_data: dict, normalized_phone: str) -> dict:
     Returns:
         Created user profile dict
     """
+    email = user_data.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
     user_id = generate_user_id()
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -74,11 +78,9 @@ def create_user_profile(user_data: dict, normalized_phone: str) -> dict:
         "user_id": user_id,
         "name": user_data.get("name", "").strip(),
         "phoneNumber": normalized_phone,
+        "email": email.lower().strip(),  # Email is now mandatory
         "createdAt": now_iso,
     }
-
-    if user_data.get("email"):
-        user_item["email"] = user_data.get("email").lower()
 
     try:
         config.users_table.put_item(Item=user_item)
@@ -99,4 +101,36 @@ def build_user_payload(user: dict) -> dict:
         "email": user.get("email"),
         "phoneNumber": user.get("phoneNumber"),
     }
+
+
+def user_exists_by_phone(phone_number: str) -> bool:
+    """
+    Check if user exists by phone number.
+    Used during signup to prevent duplicate registrations.
+    
+    Returns:
+        True if user exists, False otherwise
+    """
+    user = get_user_by_phone(phone_number)
+    return user is not None
+
+
+def user_exists_by_email(email: str) -> bool:
+    """
+    Check if user exists by email.
+    Used during signup to prevent duplicate registrations.
+    
+    Returns:
+        True if user exists, False otherwise
+    """
+    user = get_user_by_email(email)
+    return user is not None
+
+
+def get_user_by_phone_for_admin(phone_number: str) -> Optional[dict]:
+    """
+    Get user by phone number for admin operations.
+    Returns full user dict or None.
+    """
+    return get_user_by_phone(phone_number)
 

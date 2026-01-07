@@ -12,7 +12,6 @@ from app.utils.db_utils import (
     generate_doctor_id,
     normalize_phone_number,
 )
-from boto3.dynamodb.conditions import Key
 
 logger = get_logger(__name__)
 
@@ -53,6 +52,10 @@ def create_doctor_profile(doctor_data: dict, normalized_phone: str) -> dict:
     Returns:
         Created doctor profile dict
     """
+    email = doctor_data.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email is required")
+    
     doctor_id = generate_doctor_id()
     now_iso = datetime.now(timezone.utc).isoformat()
 
@@ -60,6 +63,7 @@ def create_doctor_profile(doctor_data: dict, normalized_phone: str) -> dict:
         "doctor_id": doctor_id,
         "doctorname": doctor_data.get("name", "").strip(),
         "phoneNumber": normalized_phone,
+        "email": email.lower().strip(),  # Email is now mandatory
         "createdAt": now_iso,
     }
 
@@ -67,8 +71,6 @@ def create_doctor_profile(doctor_data: dict, normalized_phone: str) -> dict:
         doctor_item["specialization"] = doctor_data.get("specialization")
     if doctor_data.get("experience") is not None:
         doctor_item["experience"] = doctor_data.get("experience")
-    if doctor_data.get("email"):
-        doctor_item["email"] = doctor_data.get("email").lower()
 
     try:
         config.doctors_table.put_item(Item=doctor_item)
@@ -91,4 +93,24 @@ def build_doctor_payload(doctor: dict) -> dict:
         "specialization": doctor.get("specialization"),
         "experience": doctor.get("experience"),
     }
+
+
+def doctor_exists_by_phone(phone_number: str) -> bool:
+    """
+    Check if doctor exists by phone number.
+    Used during signup to prevent duplicate registrations.
+    
+    Returns:
+        True if doctor exists, False otherwise
+    """
+    doctor = get_doctor_by_phone(phone_number)
+    return doctor is not None
+
+
+def get_doctor_by_phone_for_admin(phone_number: str) -> Optional[dict]:
+    """
+    Get doctor by phone number for admin operations.
+    Returns full doctor dict or None.
+    """
+    return get_doctor_by_phone(phone_number)
 
