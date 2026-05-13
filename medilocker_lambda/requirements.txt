@@ -1,6 +1,15 @@
 fastapi
 mangum
 boto3
+python-dotenv
+python-multipart
 pydantic
 colorlog
 openai
+langgraph
+langchain-core
+sse-starlette
+simple-icd-10
+simple-icd-10-cm
+# Cap <3.14: 3.14+ wheels are manylinux_2_27+ only; SAM pip uses manylinux2014 and fails ResolveDependencies
+rapidfuzz>=3,<3.14
