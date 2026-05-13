@@ -1,13 +1,14 @@
 """
 Subscription Router - API endpoints for subscription management
 """
-from fastapi import APIRouter, HTTPException, Path, Query
+from fastapi import APIRouter, HTTPException, Path, Query, Header, UploadFile, File
 from typing import Optional, List
 from app.models.schemas import (
     SubscriptionPlanCreate,
     SubscriptionPlanResponse,
     SubscriptionPlanUpdate,
     CreateSubscriptionRequest,
+    CreateTestSubscriptionRequest,
     SubscriptionResponse,
     SubscriptionValidationResponse,
     IncrementAppointmentsRequest
@@ -21,6 +22,7 @@ from app.services.subscription_plan_service import (
 )
 from app.services.user_subscription_service import (
     create_user_subscription,
+    create_test_subscription,
     get_user_subscription,
     get_user_subscriptions,
     get_doctor_subscribers,
@@ -30,6 +32,8 @@ from app.services.user_subscription_service import (
 )
 from app.utils.error_utils import handle_exception
 from app.logger import get_logger
+from app.config import ADMIN_KEY
+from app.services.patient_import_service import process_patient_excel
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/booking", tags=["Subscription"])
@@ -167,6 +171,25 @@ def get_user_subscriptions_endpoint(user_id: str = Path(..., description="User I
         handle_exception(e, "Get user subscriptions")
 
 
+@router.post("/doctors/{doctor_id}/import-patients")
+def import_patients_endpoint(
+    doctor_id: str = Path(..., description="Doctor ID"),
+    file: UploadFile = File(..., description="Excel file (.xlsx) with columns: name, phone, email, age, gender, condition (phone mandatory)"),
+):
+    """
+    Import patients from Excel and subscribe them to the doctor.
+    Uses PLAN_ID_2 as default subscription plan.
+    Creates users if they don't exist (by phone). Skips rows without phone or already subscribed.
+    """
+    try:
+        result = process_patient_excel(file=file, doctor_id=doctor_id, plan_id="PLAN_ID_2")
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        handle_exception(e, "Import patients")
+
+
 @router.get("/doctors/{doctor_id}/subscribers", response_model=List[SubscriptionResponse])
 def get_doctor_subscribers_endpoint(doctor_id: str = Path(..., description="Doctor ID")):
     """
@@ -233,4 +256,36 @@ def cancel_subscription_endpoint(
         raise
     except Exception as e:
         handle_exception(e, "Cancel subscription")
+
+
+# ==================== Test/Admin Endpoints ====================
+
+@router.post("/admin/test-subscription", response_model=SubscriptionResponse, status_code=201)
+def create_test_subscription_endpoint(
+    request: CreateTestSubscriptionRequest,
+    x_admin_key: str = Header(..., alias="x-admin-key", description="Internal admin key for authorization")
+):
+    """
+    Create a test subscription directly without payment verification.
+    This endpoint is for testing purposes only.
+    
+    Requires x-admin-key HTTP header for authorization.
+    Creates a subscription with a test payment_id format: TEST_<timestamp>_<uuid>
+    """
+    try:
+        # Verify admin key from header
+        if x_admin_key != ADMIN_KEY:
+            logger.warning(f"Unauthorized test subscription attempt with key: {x_admin_key[:10]}...")
+            raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin key")
+        
+        subscription = create_test_subscription(
+            user_id=request.user_id,
+            doctor_id=request.doctor_id,
+            plan_id=request.plan_id
+        )
+        return SubscriptionResponse(**subscription)
+    except HTTPException:
+        raise
+    except Exception as e:
+        handle_exception(e, "Create test subscription")
 

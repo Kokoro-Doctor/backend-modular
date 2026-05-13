@@ -195,3 +195,9 @@ class IncrementAppointmentsRequest(BaseModel):
     user_id: str
     doctor_id: str
 
+
+class CreateTestSubscriptionRequest(BaseModel):
+    user_id: str = Field(..., description="User ID")
+    doctor_id: str = Field(..., description="Doctor ID")
+    plan_id: str = Field(..., description="Plan ID")
+
