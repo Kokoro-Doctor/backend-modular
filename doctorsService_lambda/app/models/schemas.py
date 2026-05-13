@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from enum import Enum
 
@@ -16,6 +16,7 @@ class DoctorProfileUpdate(BaseModel):
     licenseNumber: Optional[str] = None
     registrationId: Optional[str] = None
     affiliation: Optional[str] = None
+    hospital_id: Optional[str] = None
     degreeCertificate: Optional[UploadDoc] = None
     govtIdProof: Optional[UploadDoc] = None
     profilePhoto: Optional[UploadDoc] = None
@@ -38,7 +39,7 @@ class WeekDay(str, Enum):
 
 class DoctorSlotsSetRequest(BaseModel):
     doctor_id: str
-    date: str  # YYYY-MM-DD format
+    days: int = Field(default=7, ge=1, le=90, description="Number of days to create slots for, starting from today (default: 7, max: 90)")
     slots: List[AvailabilitySlot]
 
 class DoctorSlotUpdateRequest(BaseModel):
