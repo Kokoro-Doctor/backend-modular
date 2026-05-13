@@ -35,5 +35,12 @@ PLATFORM_FEE_PERCENTAGE = float(os.environ.get("PLATFORM_FEE_PERCENTAGE", "20.0"
 lambda_client = boto3.client("lambda", region_name=AWS_REGION)
 SUBSCRIPTION_SERVICE_LAMBDA_NAME = os.environ.get("SUBSCRIPTION_SERVICE_LAMBDA_NAME", "BookingLambda")
 
+# Email configuration for admin notifications
+BREVO_SMTP_USER = os.environ.get("BREVO_SMTP_USER")
+BREVO_SMTP_KEY = os.environ.get("BREVO_SMTP_KEY")
+BREVO_SMTP_SERVER = os.environ.get("BREVO_SMTP_SERVER", "smtp-relay.brevo.com")
+BREVO_SMTP_PORT = int(os.environ.get("BREVO_SMTP_PORT", "587"))
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "business.support@kokoro.doctor")
+
 
 

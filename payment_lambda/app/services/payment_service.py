@@ -21,7 +21,8 @@ from app.config import (
     PLATFORM_FEE_PERCENTAGE
 )
 from app.services.earnings_service import create_earnings_entry
-from boto3.dynamodb.conditions import Key
+from boto3.dynamodb.conditions import Key, Attr
+from app.utils.email_utils import send_admin_payment_notification
 
 from app.logger import get_logger
 logger = get_logger(__name__)
@@ -197,6 +198,14 @@ def verify_payment(
         if status == "captured":
             invoice_url = generate_invoice_url(payment_id)
         
+        # Check if payment record already exists to preserve admin_email_sent flag
+        existing_payment = None
+        try:
+            existing_response = PAYMENTS_TABLE.get_item(Key={"payment_id": payment_id})
+            existing_payment = existing_response.get("Item")
+        except ClientError as e:
+            logger.warning(f"Could not check existing payment record: {e}")
+        
         # Store Transaction Data in DynamoDB
         # Include user_id, doctor_id, plan_id to identify who made the payment
         payment_data = {
@@ -216,6 +225,10 @@ def verify_payment(
             payment_data["doctor_id"] = doctor_id
         if plan_id:
             payment_data["plan_id"] = plan_id
+        
+        # Preserve admin_email_sent flag if it exists (for idempotency)
+        if existing_payment and existing_payment.get("admin_email_sent"):
+            payment_data["admin_email_sent"] = existing_payment["admin_email_sent"]
         
         try:
             PAYMENTS_TABLE.put_item(Item=payment_data)
@@ -266,6 +279,45 @@ def verify_payment(
                     logger.error(f"Failed to create earnings entry: {str(earnings_error)}", exc_info=True)
                     # Don't fail payment verification if earnings entry creation fails
                     # Earnings can be created manually later if needed
+        
+        # Send admin email notification for captured payments (idempotent)
+        if status == "captured":
+            try:
+                # Use update_item with condition to atomically set admin_email_sent flag
+                # This ensures email is sent only once, even with webhook retries
+                try:
+                    update_response = PAYMENTS_TABLE.update_item(
+                        Key={"payment_id": payment_id},
+                        UpdateExpression="SET admin_email_sent = :true",
+                        ConditionExpression=Attr("admin_email_sent").not_exists() | Attr("admin_email_sent").eq(False),
+                        ExpressionAttributeValues={":true": True},
+                        ReturnValues="NONE"
+                    )
+                    # If update succeeds, it means admin_email_sent was not set, so send email
+                    logger.info(f"Admin email flag set for payment {payment_id}, sending notification email")
+                    send_admin_payment_notification(
+                        payment_id=payment_id,
+                        order_id=order_id,
+                        amount=amount_paid,
+                        status=status,
+                        user_id=user_id,
+                        doctor_id=doctor_id,
+                        plan_id=plan_id,
+                        invoice_url=invoice_url,
+                        timestamp=payment_data.get("timestamp")
+                    )
+                    logger.info(f"Admin notification email sent successfully for payment {payment_id}")
+                except ClientError as e:
+                    # If condition check fails, it means admin_email_sent already exists and is True
+                    # This is expected for webhook retries - email was already sent
+                    if e.response.get("Error", {}).get("Code") == "ConditionalCheckFailedException":
+                        logger.info(f"Admin email already sent for payment {payment_id}, skipping duplicate notification")
+                    else:
+                        raise
+            except Exception as email_error:
+                # Don't fail payment verification if email sending fails
+                # Log error but continue with payment processing
+                logger.error(f"Failed to send admin notification email for payment {payment_id}: {str(email_error)}", exc_info=True)
         
         response = {
             "message": "Payment processed",
