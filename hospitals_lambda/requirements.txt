@@ -1,0 +1,11 @@
+fastapi
+mangum
+boto3
+pydantic
+colorlog
+python-dotenv
+uvicorn
+openpyxl
+python-multipart
+PyJWT
+bcrypt
