@@ -2,10 +2,9 @@ fastapi
 mangum
 boto3
 requests
-langchain_ollama
-langchain
 bcrypt
 PyJWT
 pydantic[email]
 google-auth
 colorlog
+numpy<2.0

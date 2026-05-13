@@ -67,20 +67,28 @@ def create_user_profile(user_data: dict, normalized_phone: str) -> dict:
     Returns:
         Created user profile dict
     """
-    email = user_data.get("email")
-    if not email:
-        raise HTTPException(status_code=400, detail="Email is required")
-    
+    # email = user_data.get("email")
+    # if not email:
+    #     raise HTTPException(status_code=400, detail="Email is required")
     user_id = generate_user_id()
     now_iso = datetime.now(timezone.utc).isoformat()
 
     user_item = {
         "user_id": user_id,
-        "name": user_data.get("name", "").strip(),
+        # "name": user_data.get("name", "").strip(),
         "phoneNumber": normalized_phone,
-        "email": email.lower().strip(),  # Email is now mandatory
+        # "email": email.lower().strip(),  # Email is now mandatory
         "createdAt": now_iso,
     }
+    
+    # Add optional fields if provided
+    email = user_data.get("email")
+    if email:
+        user_item["email"] = email.lower().strip()
+    
+    name = user_data.get("name")
+    if name:
+        user_item["name"] = name.strip()
 
     try:
         config.users_table.put_item(Item=user_item)

@@ -6,24 +6,11 @@ from fastapi import APIRouter
 from app.models import schemas
 from app.services.auth_service import (
     handle_login_otp_request,
-    handle_signup_otp_request,
     handle_login,
     initiate_session,
 )
 
-router = APIRouter(prefix="/auth", tags=["otp-auth"])
-
-
-@router.post("/user/request-signup-otp")
-def request_user_signup_otp(data: schemas.SignupOtpRequest):
-    # Signup OTP is sent ONLY to email
-    return handle_signup_otp_request(data.phoneNumber, data.email, "user")
-
-
-@router.post("/doctor/request-signup-otp")
-def request_doctor_signup_otp(data: schemas.SignupOtpRequest):
-    # Signup OTP is sent ONLY to email
-    return handle_signup_otp_request(data.phoneNumber, data.email, "doctor")
+router = APIRouter(prefix="/auth", tags=["auth-common"])
 
 
 @router.post("/request-otp")

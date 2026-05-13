@@ -238,12 +238,27 @@ def _otp_send_failure() -> HTTPException:
     return HTTPException(status_code=500, detail="Failed to send OTP. Please try again later.")
 
 
-def _login_discovery_response(role: str) -> dict:
-    """Return login discovery response"""
-    return {
-        "role": role,
-        "message": "OTP required to continue."
-    }
+def _login_discovery_response(role: str, record: dict) -> dict:
+    """
+    Return login discovery response.
+    For experimental flow users (no email), OTP is optional.
+    For normal users (with email), OTP is required.
+    """
+    has_email = bool(record.get("email"))
+    is_experimental_flow = not has_email
+    
+    if is_experimental_flow:
+        return {
+            "role": role,
+            "message": "OTP optional. You can login directly or request OTP.",
+            "otp_required": False
+        }
+    else:
+        return {
+            "role": role,
+            "message": "OTP required to continue.",
+            "otp_required": True
+        }
 
 
 def dispatch_otp(phone_number: Optional[str], email: Optional[str], purpose: str, 
@@ -353,7 +368,7 @@ def _issue_login_response(role: str, phone_number: str, record: dict) -> dict:
         "is_existing_user": True,
         "role": role,
         "access_token": access_token,
-        "message": "OTP verified. Logged in.",
+        "message": "Logged in successfully.",
     }
     
     # Include IDs in response (not full profiles)
@@ -524,6 +539,7 @@ def handle_login(identifier: str, otp: Optional[str] = None) -> dict:
     """
     Handle login request - identifier can be email or phone number.
     Returns discovery response if no OTP, otherwise logs in.
+    For experimental flow users (no email), OTP is optional.
     """
     # Detect identifier type and get auth record
     is_email = "@" in identifier
@@ -557,9 +573,29 @@ def handle_login(identifier: str, otp: Optional[str] = None) -> dict:
     if not role:
         raise HTTPException(status_code=400, detail="Account role missing. Please contact support.")
 
+    # Check if user is from experimental flow (no email)
+    has_email = bool(record.get("email"))
+    is_experimental_flow = not has_email
+    
+    # If no OTP provided
     if not otp:
-        return _login_discovery_response(role)
+        # # For experimental flow users, allow login without OTP
+        # if is_experimental_flow:
+        logger.info("[Login] Experimental flow login without OTP for phone %s", phone_number)
+        now_iso = datetime.now(timezone.utc).isoformat()
+        update_auth_record(
+            phone_number,
+            {
+                "last_login": now_iso,
+                "updated_at": now_iso
+            }
+        )
+        return _issue_login_response(role, phone_number, record)
+        # else:
+        #     # For normal users, return discovery response indicating OTP is required
+        #     return _login_discovery_response(role, record)
 
+    # OTP provided - validate and login
     otp_clean = otp.strip()
     if not otp_clean:
         raise HTTPException(status_code=400, detail="OTP cannot be empty.")

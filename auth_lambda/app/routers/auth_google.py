@@ -18,7 +18,7 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/auth", tags=["google-auth"])
 
-@router.post("/google")
+# @router.post("/google")
 def google_auth(data: dict):
     # small defensive check (data is expected to have 'token')
     token = data.get("token")

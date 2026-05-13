@@ -30,16 +30,22 @@ class LoginRequest(BaseModel):
 
 class UserProfileCreate(BaseModel):
     phoneNumber: str = Field(..., min_length=8)
-    email: EmailStr = Field(...)  # Now mandatory
-    otp: str = Field(..., min_length=4, max_length=6)
-    name: str = Field(..., min_length=2)
+    # email: EmailStr = Field(...)  # Now mandatory
+    # otp: str = Field(..., min_length=4, max_length=6)
+    # name: str = Field(..., min_length=2)
+    email: Optional[EmailStr] = None  # Optional for experimental flow
+    otp: Optional[str] = Field(default=None, min_length=4, max_length=6)
+    name: Optional[str] = None
 
 
 class DoctorProfileCreate(BaseModel):
     phoneNumber: str = Field(..., min_length=8)
-    email: EmailStr = Field(...)  # Now mandatory (same as user signup)
-    otp: str = Field(..., min_length=4, max_length=6)
-    name: str = Field(..., min_length=2)
+    # email: EmailStr = Field(...)  # Now mandatory (same as user signup)
+    # otp: str = Field(..., min_length=4, max_length=6)
+    # name: str = Field(..., min_length=2)
+    email: Optional[EmailStr] = None  # Optional for experimental flow
+    otp: Optional[str] = Field(default=None, min_length=4, max_length=6)
+    name: Optional[str] = None  # Optional for experimental flow
     specialization: Optional[str] = None
     experience: Optional[int] = Field(default=None, ge=0, le=80)
 
