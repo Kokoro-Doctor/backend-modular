@@ -3,7 +3,7 @@ Hospital router - hospital CRUD endpoints and login.
 """
 from fastapi import APIRouter, Body, Depends, HTTPException
 
-from app.auth.jwt_auth import assert_hospital_id_matches_token, get_current_hospital
+from app.auth.jwt_auth import assert_hospital_id_matches_token, create_hospital_token, get_current_hospital
 from app.config import JWT_EXPIRE_HOURS
 from app.models.schemas import (
     DiagnosisSummaryResponse,
@@ -54,12 +54,19 @@ def _assert_path_body_hospital_match(path_hospital_id: str, body_hospital_id: st
 
 @router.post("/signup", status_code=201)
 def create_hospital_endpoint(data: HospitalCreate):
-    """Register a new hospital with email/mobile and password."""
+    """Register a new hospital with email/mobile and password. Returns a JWT immediately so the hospital is authenticated right away."""
     logger.info(f"[HOSPITALS] POST /signup received, name={data.name}")
     try:
         hospital = create_hospital(data.model_dump())
-        logger.info(f"[HOSPITALS] POST /signup success, hospital_id={hospital.get('hospital_id')}")
-        return {"hospital": hospital}
+        hospital_id = hospital.get("hospital_id")
+        token = create_hospital_token(hospital_id)
+        logger.info(f"[HOSPITALS] POST /signup success, hospital_id={hospital_id}")
+        return {
+            "hospital": hospital,
+            "token": token,
+            "expires_in": JWT_EXPIRE_HOURS * 3600,
+            "message": "Hospital registered successfully",
+        }
     except Exception as e:
         logger.exception(f"[HOSPITALS] POST /signup failed: {e}")
         handle_exception(e, "Create hospital")

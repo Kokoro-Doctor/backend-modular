@@ -24,6 +24,18 @@ from app.services.user_doctor_relation_service import (
 logger = get_logger(__name__)
 
 PATIENT_RESPONSE_FIELDS = ("name", "phoneNumber", "user_id", "gender", "age", "createdAt")
+SENSITIVE_PATIENT_RESPONSE_FIELDS = {
+    "password",
+    "password_hash",
+    "hashed_password",
+    "otp",
+    "otp_hash",
+    "otp_expiry",
+    "otp_attempts",
+    "reset_token",
+    "refresh_token",
+    "access_token",
+}
 
 
 def _get_user(user_id: str) -> Optional[dict]:
@@ -67,7 +79,14 @@ def _scan_doctors_for_hospital(hospital_id: str) -> List[dict]:
 
 def _patient_summary(user: Optional[dict], fallback_user_id: str) -> dict:
     user = user or {}
-    summary = {field: user.get(field) for field in PATIENT_RESPONSE_FIELDS}
+    summary = {
+        field: value
+        for field, value in user.items()
+        if field not in SENSITIVE_PATIENT_RESPONSE_FIELDS
+        and not str(field).startswith("_")
+    }
+    for field in PATIENT_RESPONSE_FIELDS:
+        summary.setdefault(field, user.get(field))
     summary["user_id"] = summary.get("user_id") or fallback_user_id
     return summary
 
