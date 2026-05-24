@@ -136,7 +136,12 @@ def request_abha_login_otp(abha_number: str) -> LoginOTPResponse:
 def verify_abha_login(txn_id: str, otp: str) -> dict:
     """
     Encrypt the OTP and verify the ABHA login.
-    Returns user tokens and ABHA profile.
+    Returns a normalized dict with a nested "tokens" key and "ABHAProfile".
+
+    NOTE: ABDM's login/verify endpoint returns token fields at the TOP LEVEL
+    (unlike enrollment/enrol/byAadhaar which nests them under "tokens").
+    We normalize here so the router always sees the same shape:
+      { "tokens": { "token": ..., "expiresIn": ..., ... }, "ABHAProfile": {...} }
     """
     logger.info("[ABHAService] Verifying ABHA login OTP, txnId=%s", txn_id)
     encrypted_otp = encryption.encrypt_value(otp)
@@ -152,11 +157,28 @@ def verify_abha_login(txn_id: str, otp: str) -> dict:
         },
     }
     data = abdm_client.post("/abha/api/v3/profile/login/verify", payload)
+
+    # ABDM login verify: token fields are at top level, not under "tokens"
+    # Handle both shapes defensively (in case ABDM ever normalises their API)
+    nested = data.get("tokens") or {}
+    tokens_normalized = {
+        "token":            data.get("token")           or nested.get("token"),
+        "expiresIn":        data.get("expiresIn")       or nested.get("expiresIn"),
+        "refreshToken":     data.get("refreshToken")    or nested.get("refreshToken"),
+        "refreshExpiresIn": data.get("refreshExpiresIn") or nested.get("refreshExpiresIn"),
+    }
+
+    abha_profile = data.get("ABHAProfile") or data.get("abhaProfile")
     logger.info(
         "[ABHAService] Login verified, ABHANumber=%s",
-        data.get("ABHAProfile", {}).get("ABHANumber") if data.get("ABHAProfile") else "unknown",
+        abha_profile.get("ABHANumber") if abha_profile else "unknown",
     )
-    return data
+
+    return {
+        "tokens": tokens_normalized,
+        "ABHAProfile": abha_profile,
+        "message": data.get("message"),
+    }
 
 
 # ---------------------------------------------------------------------------

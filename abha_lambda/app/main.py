@@ -15,7 +15,8 @@ app.add_middleware(
     allow_origins=["https://kokoro.doctor", "http://localhost:8081"],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"],
+    allow_headers=["*", "X-ABHA-Token"],
+    expose_headers=["X-ABHA-Token"],
 )
 
 
