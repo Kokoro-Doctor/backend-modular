@@ -75,3 +75,43 @@ class LoginVerifyResponse(BaseModel):
 
     class Config:
         extra = "allow"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 2 — HIP Initiated Linking
+# ---------------------------------------------------------------------------
+
+class CareContext(BaseModel):
+    referenceNumber: str
+    display: str
+
+
+class CareContextPatient(BaseModel):
+    referenceNumber: str
+    display: str
+    careContexts: List[CareContext]
+    hiType: str  # PRESCRIPTION | DiagnosticReport | OPConsultation | etc.
+    count: int
+
+
+# Inbound webhook payloads (ABDM → Kokoro)
+
+class LinkTokenCallbackPayload(BaseModel):
+    """4.3.2 — ABDM posts this to our /api/v3/hip/token/on-generate-token endpoint."""
+    abhaAddress: str
+    linkToken: str
+    response: Optional[Any] = None
+
+    class Config:
+        extra = "allow"
+
+
+class CareContextCallbackPayload(BaseModel):
+    """4.3.4 — ABDM posts this to our /api/v3/link/on_carecontext endpoint."""
+    abhaAddress: Optional[str] = None
+    status: Optional[str] = None
+    response: Optional[Any] = None
+    error: Optional[Any] = None
+
+    class Config:
+        extra = "allow"

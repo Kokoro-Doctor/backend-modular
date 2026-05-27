@@ -1,0 +1,112 @@
+"""
+ABDM HIP/gateway HTTP client.
+
+Used for all Milestone 2 APIs that hit the ABDM gateway (not the ABHA base URL):
+  - Bridge URL registration (3.2.4)
+  - Facility registration (3.2.5)
+  - Link token generation (4.3.1)
+  - Care context linking (4.3.3)
+
+Unlike abdm/client.py (ABHA identity APIs), every HIP request carries
+X-HIP-ID — which is per-hospital, looked up from HospitalAbdmConfig.
+Callers must always pass hip_id explicitly; there is no global default.
+"""
+import uuid
+from datetime import datetime, timezone
+from typing import Any, Optional
+
+import requests
+from fastapi import HTTPException
+
+from app import config
+from app.abdm import token_manager
+from app.logger import get_logger
+
+logger = get_logger(__name__)
+
+
+def _utc_timestamp() -> str:
+    now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+
+def _gateway_headers(hip_id: str, link_token: Optional[str] = None) -> dict:
+    """
+    Build headers for HIP gateway calls.
+    hip_id is the ABDM service ID for the specific hospital making the call.
+    """
+    headers = {
+        "Content-Type": "application/json",
+        "REQUEST-ID":   str(uuid.uuid4()),
+        "TIMESTAMP":    _utc_timestamp(),
+        "Authorization": f"Bearer {token_manager.get_access_token()}",
+        "X-CM-ID":      config.ABDM_X_CM_ID,
+        "X-HIP-ID":     hip_id,
+    }
+    if link_token:
+        headers["X-LINK-TOKEN"] = link_token
+    return headers
+
+
+def post(path: str, payload: Any, hip_id: str, link_token: Optional[str] = None) -> dict:
+    """POST to ABDM gateway base URL with per-hospital X-HIP-ID header."""
+    url = f"{config.ABDM_GATEWAY_BASE_URL}{path}"
+    headers = _gateway_headers(hip_id=hip_id, link_token=link_token)
+    logger.debug("[HIPClient] POST %s hip_id=%s", path, hip_id)
+    resp = requests.post(url, json=payload, headers=headers, timeout=20)
+    return _handle_response(resp, path)
+
+
+def patch(path: str, payload: Any) -> dict:
+    """
+    PATCH to ABDM gateway base URL.
+    Used for bridge URL registration (3.2.4) — does not need X-HIP-ID per spec.
+    """
+    url = f"{config.ABDM_GATEWAY_BASE_URL}{path}"
+    headers = {
+        "Content-Type":  "application/json",
+        "REQUEST-ID":    str(uuid.uuid4()),
+        "TIMESTAMP":     _utc_timestamp(),
+        "Authorization": f"Bearer {token_manager.get_access_token()}",
+        "X-CM-ID":       config.ABDM_X_CM_ID,
+    }
+    logger.debug("[HIPClient] PATCH %s", path)
+    resp = requests.patch(url, json=payload, headers=headers, timeout=20)
+    return _handle_response(resp, path)
+
+
+def post_facility(path: str, payload: Any, hip_id: str) -> dict:
+    """POST to the facility registration host (3.2.5 — different base URL)."""
+    url = f"{config.ABDM_FACILITY_REG_BASE_URL}{path}"
+    headers = _gateway_headers(hip_id=hip_id)
+    logger.debug("[HIPClient] POST (facility) %s hip_id=%s", url, hip_id)
+    resp = requests.post(url, json=payload, headers=headers, timeout=20)
+    return _handle_response(resp, path)
+
+
+def _handle_response(resp: requests.Response, path: str) -> dict:
+    if resp.ok:
+        return resp.json() if resp.content else {}
+    _raise_error(resp, path)
+
+
+def _raise_error(resp: requests.Response, path: str):
+    try:
+        body = resp.json()
+        details = body.get("details", [{}])
+        if isinstance(details, list) and details:
+            message = details[0].get("message", resp.text)
+            code    = details[0].get("code", str(resp.status_code))
+        else:
+            message = body.get("message", resp.text)
+            code    = body.get("code", str(resp.status_code))
+    except Exception:
+        message = resp.text
+        code    = str(resp.status_code)
+
+    logger.error(
+        "[HIPClient] Error %s on %s — code=%s message=%s",
+        resp.status_code, path, code, message,
+    )
+    status = resp.status_code if resp.status_code in (400, 401, 403, 404, 409, 422, 429) else 502
+    raise HTTPException(status_code=status, detail=f"ABDM error [{code}]: {message}")

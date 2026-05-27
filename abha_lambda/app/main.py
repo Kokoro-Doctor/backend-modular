@@ -3,7 +3,7 @@ from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 
-from app.routers import abha_router
+from app.routers import abha_router, hip_linking_router, webhook_router
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -42,5 +42,7 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
 
 app.include_router(abha_router.router)
+app.include_router(hip_linking_router.router)
+app.include_router(webhook_router.router)
 
 handler = Mangum(app)

@@ -187,6 +187,90 @@ def get_by_kokoro_user_id(kokoro_user_id: str) -> Optional[dict]:
     return items[0] if items else None
 
 
+def get_by_abha_address(abha_address: str) -> Optional[dict]:
+    """
+    Query the abha_address-index GSI to find the record by ABHA address.
+    Used during the link-token callback to persist the incoming linkToken.
+    Requires a GSI named 'abha_address-index' on the AbhaAccounts table.
+    """
+    resp = config.abha_table.query(
+        IndexName="abha_address-index",
+        KeyConditionExpression="abha_address = :addr",
+        ExpressionAttributeValues={":addr": abha_address},
+        Limit=1,
+    )
+    items = resp.get("Items", [])
+    return items[0] if items else None
+
+
+# ---------------------------------------------------------------------------
+# Milestone 2 — Link token persistence
+# ---------------------------------------------------------------------------
+
+def save_link_token(
+    abha_address: str,
+    link_token: str,
+    link_token_expiry: str,
+    hip_id: str,
+) -> None:
+    """
+    Persist the link token received from ABDM callback (4.3.2) onto the
+    AbhaAccounts record identified by abha_address, scoped per hip_id.
+
+    Stored as a map on the record:
+        link_tokens: { "<hip_id>": { "token": "...", "expiry": "..." }, ... }
+
+    This supports multi-hospital — a patient can have active link tokens
+    from different hospitals simultaneously.
+    """
+    record = get_by_abha_address(abha_address)
+    if not record:
+        logger.warning(
+            "[AbhaAccountsService] save_link_token: no record for abha_address=%s", abha_address
+        )
+        return
+
+    abha_number = record["abha_number"]
+
+    # Step 1: initialise the map if it doesn't exist yet (one extra write on first call)
+    config.abha_table.update_item(
+        Key={"abha_number": abha_number},
+        UpdateExpression="SET link_tokens = if_not_exists(link_tokens, :empty)",
+        ExpressionAttributeValues={":empty": {}},
+    )
+
+    # Step 2: set the entry for this specific hospital
+    config.abha_table.update_item(
+        Key={"abha_number": abha_number},
+        UpdateExpression="SET link_tokens.#hip = :val",
+        ExpressionAttributeNames={"#hip": hip_id},
+        ExpressionAttributeValues={
+            ":val": {"token": link_token, "expiry": link_token_expiry},
+        },
+    )
+    logger.info(
+        "[AbhaAccountsService] Link token saved for abha_address=%s hip_id=%s",
+        abha_address, hip_id,
+    )
+
+
+def get_valid_link_token(abha_number: str, hip_id: str) -> Optional[str]:
+    """
+    Return the stored link token for abha_number scoped to a specific hospital (hip_id).
+    Returns None if absent or expired — caller should trigger generate-token again.
+    """
+    record = get(abha_number)
+    if not record:
+        return None
+    link_tokens = record.get("link_tokens") or {}
+    entry = link_tokens.get(hip_id)
+    if not entry:
+        return None
+    if not _is_valid(entry.get("expiry"), datetime.now(timezone.utc)):
+        return None
+    return entry.get("token")
+
+
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
