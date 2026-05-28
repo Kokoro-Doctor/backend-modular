@@ -7,8 +7,8 @@ from botocore.exceptions import ClientError
 from app import config
 from app.logger import get_logger
 from app.utils.db_utils import normalize_phone_number
-from app.services.user_service import get_user_by_phone
-from app.services.doctor_service import get_doctor_by_phone
+from app.services.user_service import user_exists_by_phone
+from app.services.doctor_service import doctor_exists_by_phone
 
 logger = get_logger(__name__)
 

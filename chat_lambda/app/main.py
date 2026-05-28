@@ -12,7 +12,7 @@ app = FastAPI(title="Kokoro Chat Service")
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://kokoro.doctor", "https://metafied.co", "http://localhost:8081"],
+    allow_origins=["https://kokoro.doctor", "http://localhost:8081"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -29,7 +29,7 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
     # Get the origin from the request and validate it against allowed origins
     origin = request.headers.get("origin")
-    allowed_origins = ["https://kokoro.doctor", "https://metafied.co", "http://localhost:8081"]
+    allowed_origins = ["https://kokoro.doctor", "http://localhost:8081"]
     
     # Set CORS headers - only include origin if it's in the allowed list
     headers = {}

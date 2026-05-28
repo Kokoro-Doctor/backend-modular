@@ -9,7 +9,14 @@ class CreatePaymentLinkRequest(BaseModel):
         description="Plan ID (human-readable format: PLAN_<PRICE>_<DURATION>D_<SCOPE>, e.g., PLAN_999_30D_ALL). "
         "Amount is derived from plan in database - plan_id is ONLY an identifier."
     )
-    # amount is intentionally removed - backend fetches from plan to prevent tampering
+    user_id: Optional[str] = Field(
+        None, 
+        description="User ID for subscription mapping."
+    )
+    doctor_id: Optional[str] = Field(
+        None, 
+        description="Doctor ID associated with this plan."
+    )
 
 
 class VerifyPaymentRequest(BaseModel):

@@ -4,3 +4,8 @@ boto3
 pydantic
 colorlog
 uvicorn
+numpy==2.2.6
+pandas==2.2.2
+openpyxl
+python-multipart
+dotenv

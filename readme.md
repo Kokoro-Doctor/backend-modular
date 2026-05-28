@@ -31,6 +31,56 @@ Built using **FastAPI**, **AWS Lambda**, **DynamoDB**, **S3**, and **API Gateway
 
 ---
 
+## 📁 Backend folder layout (Medilocker, Chat, Hospitals)
+
+SAM and docs live at the `backend/` root; each deployable unit is a `*_lambda` folder with `app/` (FastAPI).
+
+```
+backend/
+├── readme.md              # This file — endpoints, env vars, tables
+├── template.yaml          # AWS SAM: Lambdas, API Gateway, IAM, resources
+├── samconfig.toml         # SAM CLI deploy defaults (stack, region, …)
+├── scripts/               # Operational / deploy helpers
+├── medilocker_lambda/
+│   ├── requirements.txt
+│   ├── docs/
+│   └── app/
+│       ├── main.py
+│       ├── config.py
+│       ├── logger.py
+│       ├── models/
+│       ├── routers/       # medilocker_router, hospital_router
+│       ├── services/      # OCR, extraction, claims, prescriptions, …
+│       │   └── prompts/
+│       └── utils/
+├── chat_lambda/
+│   ├── requirements.txt
+│   ├── CHAT_LAMBDA_FLOW.md
+│   └── app/
+│       ├── main.py
+│       ├── config.py
+│       ├── logger.py
+│       ├── models/
+│       ├── routers/
+│       ├── services/
+│       └── utils/
+└── hospitals_lambda/
+    ├── requirements.txt
+    └── app/
+        ├── main.py
+        ├── config.py
+        ├── logger.py
+        ├── auth/
+        ├── models/
+        ├── routers/
+        ├── services/
+        └── utils/
+```
+
+Other Lambdas in this repo (e.g. `auth_lambda`, `booking_lambda`, `payment_lambda`) follow the same pattern and are defined in `template.yaml`.
+
+---
+
 ## 📦 Services & Endpoints
 
 Each FastAPI application is deployed independently behind API Gateway. CORS is pre-configured for `https://kokoro.doctor` and `http://localhost:8081`.
@@ -162,4 +212,5 @@ Set the following variables for each Lambda before deployment (SAM templates wir
 
 ```bash
 sam build
+sam deploy --capabilities CAPABILITY_NAMED_IAM
 ```

@@ -9,6 +9,7 @@ USERS_TABLE = os.environ["USERS_TABLE"]
 DOCTORS_TABLE = os.environ["DOCTORS_TABLE"]
 AUTH_TABLE = os.environ["AUTH_TABLE"]
 AUTH_TOKENS_TABLE = os.environ["AUTH_TOKENS_TABLE"]
+SESSIONS_TABLE_NAME = os.environ["SESSIONS_TABLE"]
 
 BREVO_SMTP_USER = os.environ["BREVO_SMTP_USER"]
 BREVO_SMTP_KEY = os.environ["BREVO_SMTP_KEY"]
@@ -47,6 +48,7 @@ users_table = dynamodb.Table(USERS_TABLE)
 doctors_table = dynamodb.Table(DOCTORS_TABLE)
 auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
+sessions_table = dynamodb.Table(SESSIONS_TABLE_NAME)
 
 # Additional tables for account deletion
 appointments_table = dynamodb.Table("AppointmentsTable")

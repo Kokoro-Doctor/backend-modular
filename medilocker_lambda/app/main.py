@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
-from app.routers import medilocker_router
+from app.routers import medilocker_router, hospital_router
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -12,7 +12,7 @@ app = FastAPI(title="Medilocker Service")
 # CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://kokoro.doctor", "https://metafied.co", "http://localhost:8081"],
+    allow_origins=["https://kokoro.doctor", "http://localhost:8081"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"]
@@ -29,7 +29,7 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
     # Get the origin from the request and validate it against allowed origins
     origin = request.headers.get("origin")
-    allowed_origins = ["https://kokoro.doctor", "https://metafied.co", "http://localhost:8081"]
+    allowed_origins = ["https://kokoro.doctor", "http://localhost:8081"]
     
     # Set CORS headers - only include origin if it's in the allowed list
     headers = {}
@@ -45,6 +45,7 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
 # Routers
 app.include_router(medilocker_router.router)
+app.include_router(hospital_router.router)
 
 # AWS Lambda handler
 handler = Mangum(app)

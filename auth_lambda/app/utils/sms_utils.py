@@ -10,13 +10,24 @@ _sns_client = boto3.client("sns", region_name=config.SMS_AWS_REGION)
 
 
 def _format_phone_number(raw_phone: str) -> str:
-    digits = raw_phone.strip()
-
-    if digits.startswith("+"):
-        return digits
-
-    digits = digits.lstrip("0").replace(" ", "")
-    return f"{config.SMS_COUNTRY_CODE}{digits}"
+    """
+    Format phone number for SMS sending.
+    Uses normalize_phone_number to ensure E.164 format.
+    For numbers without + prefix, defaults to Indian (+91) for backward compatibility.
+    """
+    from app.utils.db_utils import normalize_phone_number
+    
+    # Use the normalization function which handles international numbers
+    normalized = normalize_phone_number(raw_phone)
+    if not normalized:
+        # Fallback to old behavior if normalization fails
+        digits = raw_phone.strip()
+        if digits.startswith("+"):
+            return digits
+        digits = digits.lstrip("0").replace(" ", "")
+        return f"{config.SMS_COUNTRY_CODE}{digits}"
+    
+    return normalized
 
 
 def send_sms(phone_number: str, message: str, sms_type: str = "Transactional"):

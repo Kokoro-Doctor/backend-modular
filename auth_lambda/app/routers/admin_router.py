@@ -7,8 +7,8 @@ from app import config
 from app.logger import get_logger
 from app.models import schemas
 from app.services.account_service import delete_user_account, delete_doctor_account
-from app.services.user_service import get_user_by_phone
-from app.services.doctor_service import get_doctor_by_phone
+from app.services.user_service import get_user_by_phone_for_admin
+from app.services.doctor_service import get_doctor_by_phone_for_admin
 
 logger = get_logger(__name__)
 
@@ -39,7 +39,7 @@ def delete_account(
             raise HTTPException(status_code=400, detail="Invalid phone number format")
 
         # Check if user exists
-        user = get_user_by_phone(normalized_phone)
+        user = get_user_by_phone_for_admin(normalized_phone)
         if user:
             user_id = user.get("user_id")
             email = user.get("email")
@@ -57,7 +57,7 @@ def delete_account(
             }
 
         # Check if doctor exists
-        doctor = get_doctor_by_phone(normalized_phone)
+        doctor = get_doctor_by_phone_for_admin(normalized_phone)
         if doctor:
             doctor_id = doctor.get("doctor_id")
             email = doctor.get("email")
