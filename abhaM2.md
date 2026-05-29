@@ -1,4 +1,4 @@
-```
+```mermaid
 flowchart LR
 
 %% =========================
@@ -104,4 +104,3 @@ class H1,H2 hospital;
 class PORTAL,API,DB,CONSENT,FHIR,ENC kokoro;
 class HFR,GW,CM abdm;
 ```
-
