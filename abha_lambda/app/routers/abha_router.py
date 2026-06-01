@@ -107,7 +107,7 @@ def _require_kokoro_jwt(authorization: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 @router.post("/create/request-otp")
-def request_creation_otp(body: CreateOTPRequest):
+def request_creation_otp(body: CreateOTPRequest):  # no auth — open
     """Step 1 — Encrypt Aadhaar and request OTP to Aadhaar-linked mobile."""
     try:
         result = abha_service.request_abha_creation_otp(body.aadhaar)

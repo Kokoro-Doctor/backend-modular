@@ -23,13 +23,26 @@ from typing import Optional
 from fastapi import APIRouter, Header
 
 from app.abdm.schemas import CareContextCallbackPayload, LinkTokenCallbackPayload
-from app.services import abha_accounts_service, hospital_abdm_service
+from app.services import abha_accounts_service, abdm_transactions_service, hospital_abdm_service
 from app.logger import get_logger
 
 logger = get_logger(__name__)
 
 # No prefix — paths must match ABDM spec exactly
 router = APIRouter(tags=["ABDM Webhooks"])
+
+
+def _correlation_request_id(response) -> Optional[str]:
+    """
+    Pull the original REQUEST-ID back out of the callback body.
+    ABDM echoes it as response.requestId — this is what links the callback to
+    the PENDING transaction we recorded when we sent the request. (Note: the
+    REQUEST-ID *header* on the callback is a different id for the callback's
+    own transaction, so we must correlate on the body, not the header.)
+    """
+    if isinstance(response, dict):
+        return response.get("requestId")
+    return None
 
 
 def _parse_link_token_expiry(link_token: str) -> str:
@@ -67,20 +80,29 @@ def on_generate_token(
     X-HIP-ID identifies which hospital this token belongs to.
     We store the token in AbhaAccounts scoped to that hip_id.
     """
+    corr_id = _correlation_request_id(body.response)
     logger.info(
-        "[Webhook] on-generate-token received request_id=%s abha_address=%s x_hip_id=%s",
-        request_id, body.abhaAddress, x_hip_id,
+        "[ABDM-CB][on-generate-token] correlation_request_id=%s callback_header_request_id=%s "
+        "abha_address=%s x_hip_id=%s link_token_received=%s",
+        corr_id, request_id, body.abhaAddress, x_hip_id, bool(body.linkToken),
     )
 
     if not x_hip_id:
         logger.warning(
-            "[Webhook] on-generate-token: missing X-HIP-ID for abha_address=%s — cannot scope token",
+            "[ABDM-CB][on-generate-token] missing X-HIP-ID for abha_address=%s — cannot scope token",
             body.abhaAddress,
         )
+        if corr_id:
+            abdm_transactions_service.mark_failed(
+                corr_id,
+                error={"message": "Callback missing X-HIP-ID; token not scoped"},
+                callback_payload=body.model_dump(),
+            )
         return {}
 
     expiry = _parse_link_token_expiry(body.linkToken)
 
+    db_ok = True
     try:
         abha_accounts_service.save_link_token(
             abha_address=body.abhaAddress,
@@ -89,11 +111,23 @@ def on_generate_token(
             hip_id=x_hip_id,
         )
     except Exception:
+        db_ok = False
         # Log but still return 202 — ABDM must not retry because of our DB error
         logger.exception(
-            "[Webhook] on-generate-token: DB save failed for abha_address=%s hip_id=%s",
+            "[ABDM-CB][on-generate-token] DB save failed for abha_address=%s hip_id=%s",
             body.abhaAddress, x_hip_id,
         )
+
+    # Close the transaction either way so the row reflects what happened.
+    if corr_id:
+        if db_ok:
+            abdm_transactions_service.mark_completed(corr_id, callback_payload=body.model_dump())
+        else:
+            abdm_transactions_service.mark_failed(
+                corr_id,
+                error={"message": "Link token received but DB save failed"},
+                callback_payload=body.model_dump(),
+            )
 
     return {}
 
@@ -117,6 +151,8 @@ def on_care_context(
     Extend this handler to update appointment/health record status once
     that domain model is in place (Milestone 3+).
     """
+    corr_id = _correlation_request_id(body.response)
+
     # Resolve hospital name for richer logging
     hospital_name = None
     if x_hip_id:
@@ -128,14 +164,22 @@ def on_care_context(
 
     if body.error:
         logger.error(
-            "[Webhook] on_carecontext ERROR request_id=%s abha_address=%s x_hip_id=%s hospital=%s error=%s",
-            request_id, body.abhaAddress, x_hip_id, hospital_name, body.error,
+            "[ABDM-CB][on_carecontext] FAILED correlation_request_id=%s abha_address=%s "
+            "x_hip_id=%s hospital=%s error=%s",
+            corr_id, body.abhaAddress, x_hip_id, hospital_name, body.error,
         )
+        if corr_id:
+            abdm_transactions_service.mark_failed(
+                corr_id, error=body.error, callback_payload=body.model_dump()
+            )
     else:
         logger.info(
-            "[Webhook] on_carecontext SUCCESS request_id=%s abha_address=%s x_hip_id=%s hospital=%s status=%s",
-            request_id, body.abhaAddress, x_hip_id, hospital_name, body.status,
+            "[ABDM-CB][on_carecontext] SUCCESS correlation_request_id=%s abha_address=%s "
+            "x_hip_id=%s hospital=%s status=%s",
+            corr_id, body.abhaAddress, x_hip_id, hospital_name, body.status,
         )
+        if corr_id:
+            abdm_transactions_service.mark_completed(corr_id, callback_payload=body.model_dump())
 
     # Future: update care context / appointment status on the health record here
 

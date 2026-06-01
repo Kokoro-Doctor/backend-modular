@@ -30,14 +30,20 @@ def _utc_timestamp() -> str:
     return now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
 
 
-def _gateway_headers(hip_id: str, link_token: Optional[str] = None) -> dict:
+def _gateway_headers(
+    hip_id: str,
+    link_token: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> dict:
     """
     Build headers for HIP gateway calls.
     hip_id is the ABDM service ID for the specific hospital making the call.
+    request_id is the REQUEST-ID transaction header; callers that need to
+    correlate the async callback pass their own (so they can persist it first).
     """
     headers = {
         "Content-Type": "application/json",
-        "REQUEST-ID":   str(uuid.uuid4()),
+        "REQUEST-ID":   request_id or str(uuid.uuid4()),
         "TIMESTAMP":    _utc_timestamp(),
         "Authorization": f"Bearer {token_manager.get_access_token()}",
         "X-CM-ID":      config.ABDM_X_CM_ID,
@@ -48,11 +54,21 @@ def _gateway_headers(hip_id: str, link_token: Optional[str] = None) -> dict:
     return headers
 
 
-def post(path: str, payload: Any, hip_id: str, link_token: Optional[str] = None) -> dict:
-    """POST to ABDM gateway base URL with per-hospital X-HIP-ID header."""
+def post(
+    path: str,
+    payload: Any,
+    hip_id: str,
+    link_token: Optional[str] = None,
+    request_id: Optional[str] = None,
+) -> dict:
+    """
+    POST to ABDM gateway base URL with per-hospital X-HIP-ID header.
+    Pass request_id to control the REQUEST-ID header (used for async callback
+    correlation); if omitted a fresh UUID is generated.
+    """
     url = f"{config.ABDM_GATEWAY_BASE_URL}{path}"
-    headers = _gateway_headers(hip_id=hip_id, link_token=link_token)
-    logger.debug("[HIPClient] POST %s hip_id=%s", path, hip_id)
+    headers = _gateway_headers(hip_id=hip_id, link_token=link_token, request_id=request_id)
+    logger.debug("[HIPClient] POST %s hip_id=%s request_id=%s", path, hip_id, headers["REQUEST-ID"])
     resp = requests.post(url, json=payload, headers=headers, timeout=20)
     return _handle_response(resp, path)
 

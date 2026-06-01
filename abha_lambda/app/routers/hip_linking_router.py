@@ -14,15 +14,20 @@ Endpoints:
   PATCH /abha/bridge/url               — 3.2.4: admin — register Kokoro webhook URL with ABDM
   POST  /abha/bridge/register-facility — 3.2.5: admin — register hospital facility + HRP bridge
   GET   /abha/bridge/hospitals         — admin — list all registered hospitals
+  GET   /abha/transactions             — admin — inspect ABDM async request/callback log
 """
 from typing import List, Optional
 
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.abdm.schemas import CareContextPatient
-from app.routers.abha_router import _require_kokoro_jwt
-from app.services import abha_accounts_service, hip_linking_service, hospital_abdm_service
+from app.services import (
+    abha_accounts_service,
+    abdm_transactions_service,
+    hip_linking_service,
+    hospital_abdm_service,
+)
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -69,28 +74,22 @@ class RegisterFacilityRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 @router.post("/link/generate-token")
-def generate_link_token(
-    body: GenerateLinkTokenRequest,
-    authorization: Optional[str] = Header(None),
-):
+def generate_link_token(body: GenerateLinkTokenRequest):
     """
     Ask ABDM to generate a link token for a patient's ABHA at a specific hospital.
     Returns 202 immediately — the actual link token arrives at our webhook
     (/api/v3/hip/token/on-generate-token) and is stored automatically under
     that hospital's hip_id.
 
-    Requires Kokoro JWT. Either abha_address or abha_number is required.
+    Either abha_address or abha_number is required.
     """
-    _require_kokoro_jwt(authorization)
-
     if not body.abha_address and not body.abha_number:
         raise HTTPException(
             status_code=400,
             detail="Either abha_address or abha_number must be provided.",
         )
-
     try:
-        hip_linking_service.generate_link_token(
+        request_id = hip_linking_service.generate_link_token(
             hospital_id=body.hospital_id,
             name=body.name,
             gender=body.gender,
@@ -99,7 +98,8 @@ def generate_link_token(
             abha_number=body.abha_number,
         )
         return {
-            "message": "Link token generation request accepted. Token will be available shortly.",
+            "message":      "Link token generation request accepted. Token will be available shortly.",
+            "request_id":   request_id,
             "hospital_id":  body.hospital_id,
             "abha_address": body.abha_address,
             "abha_number":  body.abha_number,
@@ -116,20 +116,13 @@ def generate_link_token(
 # ---------------------------------------------------------------------------
 
 @router.post("/link/care-context")
-def link_care_context(
-    body: LinkCareContextRequest,
-    authorization: Optional[str] = Header(None),
-):
+def link_care_context(body: LinkCareContextRequest):
     """
     Link one or more care contexts to a patient's ABHA address for a specific hospital.
     Looks up the stored link token from DB scoped to hospital's hip_id.
     Call generate-token first if the token is not yet available.
     Returns 202 immediately; confirmation arrives at /api/v3/link/on_carecontext.
-
-    Requires Kokoro JWT.
     """
-    _require_kokoro_jwt(authorization)
-
     # Get hospital config to resolve hip_id
     hospital = hospital_abdm_service.get_or_raise(body.hospital_id)
     hip_id   = hospital["hip_id"]
@@ -158,7 +151,7 @@ def link_care_context(
         )
 
     try:
-        hip_linking_service.link_care_context(
+        request_id = hip_linking_service.link_care_context(
             hospital_id=body.hospital_id,
             abha_address=body.abha_address,
             patient_records=body.patient,
@@ -167,6 +160,7 @@ def link_care_context(
         )
         return {
             "message":      "Care context linking request accepted.",
+            "request_id":   request_id,
             "hospital_id":  body.hospital_id,
             "abha_address": body.abha_address,
         }
@@ -182,17 +176,12 @@ def link_care_context(
 # ---------------------------------------------------------------------------
 
 @router.patch("/bridge/url")
-def update_bridge_url(
-    body: UpdateBridgeUrlRequest,
-    authorization: Optional[str] = Header(None),
-):
+def update_bridge_url(body: UpdateBridgeUrlRequest):
     """
     Register Kokoro's deployed API base URL as the ABDM bridge callback URL.
     ABDM will POST all async callbacks to {url}/api/v3/hip/...
     One-time setup per environment (sbx / prod).
-    Requires Kokoro JWT.
     """
-    _require_kokoro_jwt(authorization)
     try:
         hip_linking_service.update_bridge_url(body.url)
         return {"message": f"Bridge URL updated to {body.url}"}
@@ -208,17 +197,12 @@ def update_bridge_url(
 # ---------------------------------------------------------------------------
 
 @router.post("/bridge/register-facility")
-def register_facility(
-    body: RegisterFacilityRequest,
-    authorization: Optional[str] = Header(None),
-):
+def register_facility(body: RegisterFacilityRequest):
     """
     Register a hospital facility with ABDM and store the config in DB.
     hip_name becomes the hospital's permanent X-HIP-ID for all future calls.
     Must be ≤15 characters, alphanumeric, unique per bridge per facility.
-    Requires Kokoro JWT.
     """
-    _require_kokoro_jwt(authorization)
     try:
         hip_linking_service.register_facility(
             hospital_id=body.hospital_id,
@@ -242,13 +226,53 @@ def register_facility(
 
 
 # ---------------------------------------------------------------------------
-# Admin — list all registered hospitals
+# Admin — transactions log
+# ---------------------------------------------------------------------------
+
+@router.get("/transactions")
+def list_transactions(
+    hip_id: Optional[str] = None,
+    status: Optional[str] = None,
+    request_id: Optional[str] = None,
+    limit: int = 50,
+):
+    """
+    Inspect ABDM async request/callback transactions.
+
+    Query params:
+      request_id  — fetch a single transaction (full request + callback bodies)
+      hip_id      — all transactions for one hospital (uses GSI, newest first)
+      status      — filter by PENDING | COMPLETED | FAILED
+      limit       — max rows (default 50)
+
+    With no hip_id/request_id returns the most recent transactions (scan).
+    """
+    try:
+        if request_id:
+            txn = abdm_transactions_service.get_hydrated(request_id)
+            if not txn:
+                raise HTTPException(status_code=404, detail=f"No transaction for request_id {request_id}")
+            return {"transaction": txn}
+
+        if hip_id:
+            items = abdm_transactions_service.list_by_hip(hip_id, status=status, limit=limit)
+        else:
+            items = abdm_transactions_service.list_recent(status=status, limit=limit)
+        return {"transactions": items, "count": len(items)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[HIPLinking] list_transactions failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Admin — list registered hospitals
 # ---------------------------------------------------------------------------
 
 @router.get("/bridge/hospitals")
-def list_hospitals(authorization: Optional[str] = Header(None)):
-    """Return all hospitals registered with ABDM. Admin only."""
-    _require_kokoro_jwt(authorization)
+def list_hospitals():
+    """Return all hospitals registered with ABDM."""
     try:
         hospitals = hospital_abdm_service.list_all()
         return {"hospitals": hospitals, "count": len(hospitals)}

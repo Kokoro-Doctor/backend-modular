@@ -13,6 +13,13 @@ abha_table = dynamodb.Table(ABHA_TABLE)
 HOSPITAL_ABDM_TABLE = os.environ.get("HOSPITAL_ABDM_TABLE", "HospitalAbdmConfig")
 hospital_abdm_table = dynamodb.Table(HOSPITAL_ABDM_TABLE)
 
+# Tracking table for ABDM async (callback-based) requests — see abdm_transactions_service
+ABDM_TRANSACTIONS_TABLE = os.environ.get("ABDM_TRANSACTIONS_TABLE", "AbdmTransactions")
+abdm_transactions_table = dynamodb.Table(ABDM_TRANSACTIONS_TABLE)
+
+# How long a transaction row lives before DynamoDB TTL auto-deletes it
+ABDM_TRANSACTION_TTL_DAYS = int(os.environ.get("ABDM_TRANSACTION_TTL_DAYS", "90"))
+
 # ABDM credentials and endpoints
 ABDM_CLIENT_ID        = os.environ["ABDM_CLIENT_ID"]
 ABDM_CLIENT_SECRET    = os.environ["ABDM_CLIENT_SECRET"]

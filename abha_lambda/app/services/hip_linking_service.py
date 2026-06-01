@@ -12,11 +12,12 @@ from HospitalAbdmConfig and passed to the ABDM gateway.
 
 Async callback handlers live in routers/webhook_router.py, not here.
 """
+import uuid
 from typing import List, Optional
 
 from app.abdm import hip_client
 from app.abdm.schemas import CareContextPatient
-from app.services import hospital_abdm_service
+from app.services import hospital_abdm_service, abdm_transactions_service
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -104,12 +105,16 @@ def generate_link_token(
     year_of_birth: int,
     abha_address: Optional[str] = None,
     abha_number: Optional[str] = None,
-) -> None:
+) -> str:
     """
     Ask ABDM to generate a link token for the patient identified by abhaAddress
     or abhaNumber. Returns immediately (202). The actual token arrives via the
     4.3.2 callback at /api/v3/hip/token/on-generate-token where it is stored
     in AbhaAccounts scoped to this hospital's hip_id.
+
+    A PENDING row is recorded in AbdmTransactions (keyed by the REQUEST-ID we
+    send) so the callback can be correlated back to this request. The request_id
+    is returned to the caller for tracking.
 
     Either abha_address or abha_number must be provided.
     """
@@ -119,9 +124,11 @@ def generate_link_token(
     hospital = hospital_abdm_service.get_or_raise(hospital_id)
     hip_id   = hospital["hip_id"]
 
+    request_id = str(uuid.uuid4())
+
     logger.info(
-        "[HIPLinkingService] Generating link token hospital_id=%s hip_id=%s abha_address=%s",
-        hospital_id, hip_id, abha_address,
+        "[HIPLinkingService] Generating link token hospital_id=%s hip_id=%s abha_address=%s request_id=%s",
+        hospital_id, hip_id, abha_address, request_id,
     )
     payload = {
         "name":        name,
@@ -133,8 +140,34 @@ def generate_link_token(
     if abha_number:
         payload["abhaNumber"] = abha_number
 
-    hip_client.post("/api/hiecm/v3/token/generate-token", payload, hip_id=hip_id)
-    logger.info("[HIPLinkingService] Link token generation request sent (202 accepted)")
+    # Record the request as PENDING before sending so the callback can correlate.
+    abdm_transactions_service.create_pending(
+        request_id=request_id,
+        api="generate-token",
+        hospital_id=hospital_id,
+        hip_id=hip_id,
+        abha_address=abha_address,
+        request_payload=payload,
+    )
+
+    try:
+        hip_client.post(
+            "/api/hiecm/v3/token/generate-token",
+            payload,
+            hip_id=hip_id,
+            request_id=request_id,
+        )
+    except Exception as e:
+        # Synchronous rejection (non-202) — no callback will ever arrive, so
+        # close the transaction now instead of leaving it PENDING forever.
+        abdm_transactions_service.mark_failed(request_id, error={"message": str(e)})
+        raise
+
+    logger.info(
+        "[HIPLinkingService] Link token generation request sent (202 accepted) request_id=%s",
+        request_id,
+    )
+    return request_id
 
 
 # ---------------------------------------------------------------------------
@@ -147,21 +180,26 @@ def link_care_context(
     patient_records: List[CareContextPatient],
     link_token: str,
     abha_number: Optional[str] = None,
-) -> None:
+) -> str:
     """
     Link one or more care contexts against the patient's ABHA address.
     Requires a valid link token (previously obtained via 4.3.1 → 4.3.2 callback).
     Returns immediately (202). Confirmation arrives via 4.3.4 callback at
     /api/v3/link/on_carecontext.
 
+    A PENDING row is recorded in AbdmTransactions (keyed by the REQUEST-ID we
+    send) so the 4.3.4 callback can be correlated. The request_id is returned.
+
     link_token is passed as X-LINK-TOKEN header by hip_client.post().
     """
     hospital = hospital_abdm_service.get_or_raise(hospital_id)
     hip_id   = hospital["hip_id"]
 
+    request_id = str(uuid.uuid4())
+
     logger.info(
-        "[HIPLinkingService] Linking care context hospital_id=%s hip_id=%s abha_address=%s",
-        hospital_id, hip_id, abha_address,
+        "[HIPLinkingService] Linking care context hospital_id=%s hip_id=%s abha_address=%s request_id=%s",
+        hospital_id, hip_id, abha_address, request_id,
     )
     payload: dict = {
         "abhaAddress": abha_address,
@@ -170,10 +208,32 @@ def link_care_context(
     if abha_number:
         payload["abhaNumber"] = abha_number
 
-    hip_client.post(
-        "/api/hiecm/hip/v3/link/carecontext",
-        payload,
+    # Record the request as PENDING before sending so the callback can correlate.
+    abdm_transactions_service.create_pending(
+        request_id=request_id,
+        api="link-carecontext",
+        hospital_id=hospital_id,
         hip_id=hip_id,
-        link_token=link_token,
+        abha_address=abha_address,
+        request_payload=payload,
     )
-    logger.info("[HIPLinkingService] Care context link request sent (202 accepted)")
+
+    try:
+        hip_client.post(
+            "/api/hiecm/hip/v3/link/carecontext",
+            payload,
+            hip_id=hip_id,
+            link_token=link_token,
+            request_id=request_id,
+        )
+    except Exception as e:
+        # Synchronous rejection (non-202) — no callback will ever arrive, so
+        # close the transaction now instead of leaving it PENDING forever.
+        abdm_transactions_service.mark_failed(request_id, error={"message": str(e)})
+        raise
+
+    logger.info(
+        "[HIPLinkingService] Care context link request sent (202 accepted) request_id=%s",
+        request_id,
+    )
+    return request_id
