@@ -1,33 +1,29 @@
 """
-ABHA API endpoints.
+ABHA API endpoints — no auth required on any endpoint.
 
 Token management is entirely backend-driven:
   • create / login  →  profile + tokens saved to AbhaAccounts DynamoDB table
-  • profile / card  →  frontend sends Kokoro JWT (Authorization header)
-                       backend decodes JWT → extracts user_id → queries GSI
-                       → fetches token from DB → auto-refreshes if needed
+  • profile / card  →  caller sends abha_number as query param
+                       backend looks up stored ABDM token → auto-refreshes if needed
                        → calls ABDM live and returns result
 
 Flow A — Create new ABHA (Aadhaar-based):
   POST /abha/create/request-otp   → request OTP
-  POST /abha/create/verify-otp    → verify OTP → save to DB (with kokoro_user_id if logged in)
+  POST /abha/create/verify-otp    → verify OTP → save to DB
 
 Flow B — Login with existing ABHA:
   POST /abha/login/request-otp    → request OTP
-  POST /abha/login/verify-otp     → verify OTP → save to DB (with kokoro_user_id if logged in)
+  POST /abha/login/verify-otp     → verify OTP → save to DB
 
-Flow C — Profile & card (Kokoro JWT required):
-  GET  /abha/profile              → Authorization: Bearer <kokoro_jwt> → GSI lookup → live ABDM fetch
-  GET  /abha/card                 → Authorization: Bearer <kokoro_jwt> → GSI lookup → ABDM download
+Flow C — Profile & card (abha_number query param required):
+  GET  /abha/profile?abha_number=XX-XXXX-XXXX-XXXX  → lookup by abha_number → live ABDM fetch
+  GET  /abha/card?abha_number=XX-XXXX-XXXX-XXXX     → lookup by abha_number → ABDM download
 """
 import base64
-from typing import Optional
 
-import jwt as pyjwt
-from fastapi import APIRouter, Header, HTTPException
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from app import config
 from app.services import abha_service
 from app.services import abha_accounts_service
 from app.abdm.schemas import ABHAProfile, ABDMTokens
@@ -45,13 +41,16 @@ router = APIRouter(prefix="/abha", tags=["ABHA"])
 class CreateOTPRequest(BaseModel):
     aadhaar: str
 
+
 class CreateVerifyOTPRequest(BaseModel):
     txn_id: str
     otp: str
     mobile: str
 
+
 class LoginOTPRequest(BaseModel):
     abha_number: str
+
 
 class LoginVerifyOTPRequest(BaseModel):
     txn_id: str
@@ -59,55 +58,11 @@ class LoginVerifyOTPRequest(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# JWT helper
-# ---------------------------------------------------------------------------
-
-def _decode_kokoro_jwt(authorization: Optional[str]) -> Optional[str]:
-    """
-    Decode the Kokoro JWT from the Authorization header and return user_id.
-    Returns None if header is absent (unauthenticated call is allowed for
-    create/login; required for profile/card which raise manually).
-    Raises 401 if header is present but token is invalid/expired.
-    """
-    if not authorization or not authorization.startswith("Bearer "):
-        return None
-    token = authorization.removeprefix("Bearer ").strip()
-    try:
-        payload = pyjwt.decode(
-            token,
-            config.JWT_SECRET,
-            algorithms=[config.JWT_ALGORITHM],
-            issuer=config.JWT_ISSUER,
-        )
-        user_id = payload.get("user_id")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid Kokoro token: user_id missing.")
-        return user_id
-    except pyjwt.ExpiredSignatureError:
-        raise HTTPException(status_code=401, detail="Kokoro session expired. Please login again.")
-    except pyjwt.InvalidTokenError as e:
-        raise HTTPException(status_code=401, detail=f"Invalid Kokoro token: {e}")
-
-
-def _require_kokoro_jwt(authorization: Optional[str]) -> str:
-    """Like _decode_kokoro_jwt but raises 401 if header is missing."""
-    if not authorization:
-        raise HTTPException(
-            status_code=401,
-            detail="Authorization header required. Please login to Kokoro first.",
-        )
-    user_id = _decode_kokoro_jwt(authorization)
-    if not user_id:
-        raise HTTPException(status_code=401, detail="Authorization header required.")
-    return user_id
-
-
-# ---------------------------------------------------------------------------
 # Flow A — ABHA Creation
 # ---------------------------------------------------------------------------
 
 @router.post("/create/request-otp")
-def request_creation_otp(body: CreateOTPRequest):  # no auth — open
+def request_creation_otp(body: CreateOTPRequest):
     """Step 1 — Encrypt Aadhaar and request OTP to Aadhaar-linked mobile."""
     try:
         result = abha_service.request_abha_creation_otp(body.aadhaar)
@@ -120,18 +75,16 @@ def request_creation_otp(body: CreateOTPRequest):  # no auth — open
 
 
 @router.post("/create/verify-otp")
-def create_abha(body: CreateVerifyOTPRequest, authorization: Optional[str] = Header(None)):
+def create_abha(body: CreateVerifyOTPRequest):
     """
     Step 2 — Verify OTP and create / retrieve the ABHA account.
     Saves the full profile + tokens to AbhaAccounts table.
-    If the caller sends a Kokoro JWT, the ABHA record is linked to their user_id.
     """
-    kokoro_user_id = _decode_kokoro_jwt(authorization)  # None if not logged in — OK
     try:
         result = abha_service.create_abha_by_aadhaar(body.txn_id, body.otp, body.mobile)
 
         try:
-            abha_accounts_service.save(result.ABHAProfile, result.tokens, kokoro_user_id)
+            abha_accounts_service.save(result.ABHAProfile, result.tokens)
         except Exception:
             logger.exception("[ABHA] create_abha: DB save failed (non-fatal)")
 
@@ -168,13 +121,11 @@ def request_login_otp(body: LoginOTPRequest):
 
 
 @router.post("/login/verify-otp")
-def verify_login(body: LoginVerifyOTPRequest, authorization: Optional[str] = Header(None)):
+def verify_login(body: LoginVerifyOTPRequest):
     """
     Step 2 — Verify OTP and log in to ABHA.
     Saves the full profile + tokens to AbhaAccounts table.
-    If the caller sends a Kokoro JWT, the ABHA record is linked to their user_id.
     """
-    kokoro_user_id = _decode_kokoro_jwt(authorization)  # None if not logged in — OK
     try:
         data = abha_service.verify_abha_login(body.txn_id, body.otp)
 
@@ -190,7 +141,7 @@ def verify_login(body: LoginVerifyOTPRequest, authorization: Optional[str] = Hea
 
         if profile and tokens:
             try:
-                abha_accounts_service.save(profile, tokens, kokoro_user_id)
+                abha_accounts_service.save(profile, tokens)
             except Exception:
                 logger.exception("[ABHA] verify_login: DB save failed (non-fatal)")
 
@@ -208,28 +159,24 @@ def verify_login(body: LoginVerifyOTPRequest, authorization: Optional[str] = Hea
 
 
 # ---------------------------------------------------------------------------
-# Flow C — Profile & Card  (Kokoro JWT required)
+# Flow C — Profile & Card  (abha_number query param required, no auth)
 # ---------------------------------------------------------------------------
 
 @router.get("/profile")
-def get_profile(authorization: Optional[str] = Header(None)):
+def get_profile(abha_number: str):
     """
     Fetch the ABHA profile live from ABDM.
-    Requires Authorization: Bearer <kokoro_jwt>.
-    Backend decodes JWT → extracts user_id → queries GSI → gets stored ABDM token.
+    Requires abha_number as a query parameter.
+    Backend looks up stored ABDM token by abha_number and auto-refreshes if needed.
     """
-    kokoro_user_id = _require_kokoro_jwt(authorization)
     try:
-        valid_token = abha_accounts_service.get_valid_token_by_kokoro_user(kokoro_user_id)
+        valid_token = abha_accounts_service.get_valid_token(abha_number)
         profile     = abha_service.get_abha_profile(valid_token)
 
-        record = abha_accounts_service.get_by_kokoro_user_id(kokoro_user_id)
-        abha_number = record.get("abha_number") if record else None
-        if abha_number:
-            try:
-                abha_accounts_service.update_profile(abha_number, profile)
-            except Exception:
-                logger.warning("[ABHA] get_profile: profile sync failed (non-fatal)")
+        try:
+            abha_accounts_service.update_profile(abha_number, profile)
+        except Exception:
+            logger.warning("[ABHA] get_profile: profile sync failed (non-fatal)")
 
         return {"abha_profile": profile.model_dump(exclude_none=True)}
     except HTTPException:
@@ -240,14 +187,13 @@ def get_profile(authorization: Optional[str] = Header(None)):
 
 
 @router.get("/card")
-def get_card(authorization: Optional[str] = Header(None)):
+def get_card(abha_number: str):
     """
     Download the ABHA card as Base64 PDF.
-    Requires Authorization: Bearer <kokoro_jwt>.
+    Requires abha_number as a query parameter.
     """
-    kokoro_user_id = _require_kokoro_jwt(authorization)
     try:
-        valid_token = abha_accounts_service.get_valid_token_by_kokoro_user(kokoro_user_id)
+        valid_token = abha_accounts_service.get_valid_token(abha_number)
         pdf_bytes   = abha_service.download_abha_card_bytes(valid_token)
         return {"card_base64": base64.b64encode(pdf_bytes).decode("utf-8")}
     except HTTPException:
