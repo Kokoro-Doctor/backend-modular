@@ -5,8 +5,10 @@ ABDM POSTs async responses to these exact paths after we register our base URL
 via 3.2.4. The paths are fixed by the ABDM spec and cannot be changed.
 
 Endpoints:
-  POST /api/v3/hip/token/on-generate-token  — 4.3.2: receive link token
-  POST /api/v3/link/on_carecontext          — 4.3.4: care context linking confirmation
+  POST /api/v3/hip/token/on-generate-token     — 4.3.2: receive link token
+  POST /api/v3/link/on_carecontext             — 4.3.4: care context linking confirmation
+  POST /api/v3/consent/request/hip/notify      — 6.3.1: consent granted/revoked notify
+  POST /api/v3/hip/health-information/request   — 6.3.3: health-information request
 
 X-HIP-ID on every callback tells us which hospital the event belongs to.
 We use it to look up the hospital record (for logging/routing) and to scope
@@ -22,8 +24,26 @@ from typing import Optional
 
 from fastapi import APIRouter, Header
 
-from app.abdm.schemas import CareContextCallbackPayload, LinkTokenCallbackPayload
-from app.services import abha_accounts_service, abdm_transactions_service, hospital_abdm_service
+from app.abdm.schemas import (
+    CareContextCallbackPayload,
+    LinkTokenCallbackPayload,
+    ConsentNotificationPayload,
+    HealthInformationRequestPayload,
+    HiuConsentOnInitPayload,
+    HiuConsentNotifyPayload,
+    HiuConsentOnStatusPayload,
+    HiuConsentOnFetchPayload,
+    HiuDataTransferPayload,
+)
+from app.services import (
+    abha_accounts_service,
+    abdm_transactions_service,
+    hospital_abdm_service,
+    consent_service,
+    data_flow_service,
+    hiu_consent_service,
+    hiu_data_service,
+)
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -183,4 +203,299 @@ def on_care_context(
 
     # Future: update care context / appointment status on the health record here
 
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# 6.3.1 — Consent notify (ABDM → HIP when a consent is granted/revoked)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/consent/request/hip/notify", status_code=202)
+def on_consent_notify(
+    body: ConsentNotificationPayload,
+    authorization: Optional[str] = Header(None),
+    x_hip_id: Optional[str] = Header(None, alias="X-HIP-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """
+    ABDM posts the consent artefact here once a consent request is granted
+    (or revoked). We persist the artefact keyed by consentId so the later
+    6.3.3 health-information request can be served, then acknowledge via 6.3.2,
+    echoing this callback's REQUEST-ID back as response.requestId.
+    """
+    notification = body.notification
+    consent_id = notification.consentId
+    if not consent_id and isinstance(notification.consentDetail, dict):
+        consent_id = notification.consentDetail.get("consentId")
+
+    logger.info(
+        "[ABDM-CB][consent-notify] consent_id=%s status=%s x_hip_id=%s request_id=%s",
+        consent_id, notification.status, x_hip_id, request_id,
+    )
+
+    if not consent_id:
+        logger.warning("[ABDM-CB][consent-notify] missing consentId — cannot process")
+        return {}
+
+    # Persist the artefact (best-effort — still 202 so ABDM doesn't retry on our DB error).
+    try:
+        consent_service.save(
+            consent_id=consent_id,
+            status=notification.status or "GRANTED",
+            consent_detail=notification.consentDetail,
+            hip_id=x_hip_id,
+            notify_request_id=request_id,
+            signature=notification.signature,
+        )
+    except Exception:
+        logger.exception("[ABDM-CB][consent-notify] failed to persist consent_id=%s", consent_id)
+
+    # Acknowledge the notify (6.3.2). Needs hip_id + the callback's REQUEST-ID.
+    if x_hip_id and request_id:
+        try:
+            data_flow_service.acknowledge_consent_notify(
+                consent_id=consent_id,
+                notify_request_id=request_id,
+                hip_id=x_hip_id,
+            )
+        except Exception:
+            logger.exception(
+                "[ABDM-CB][consent-notify] on-notify acknowledgement failed consent_id=%s",
+                consent_id,
+            )
+    else:
+        logger.warning(
+            "[ABDM-CB][consent-notify] missing X-HIP-ID or REQUEST-ID — skipping 6.3.2 ack "
+            "(consent_id=%s)", consent_id,
+        )
+
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# 6.3.3 — Health-information request (ABDM → HIP, kicks off the data push)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/hip/health-information/request", status_code=202)
+def on_health_information_request(
+    body: HealthInformationRequestPayload,
+    authorization: Optional[str] = Header(None),
+    x_hip_id: Optional[str] = Header(None, alias="X-HIP-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """
+    ABDM forwards the HIU's data request here: consent id, the HIU dataPushUrl
+    and the HIU's key material. We hand off to data_flow_service which
+    acknowledges (6.3.4), encrypts + pushes the bundles (6.3.5) and notifies the
+    CM (6.3.6). Wrapped so we always return 202 to ABDM regardless of outcome.
+    """
+    hi = body.hiRequest
+    consent_id = (hi.consent or {}).get("id")
+    data_push_url = hi.dataPushUrl
+    hiu_key_material = hi.keyMaterial or {}
+    # transactionId may arrive in the body or fall back to the REQUEST-ID header.
+    transaction_id = body.transactionId or request_id
+
+    logger.info(
+        "[ABDM-CB][hi-request] consent_id=%s transaction_id=%s x_hip_id=%s data_push_url=%s",
+        consent_id, transaction_id, x_hip_id, data_push_url,
+    )
+
+    if not (consent_id and data_push_url and x_hip_id and transaction_id):
+        logger.warning(
+            "[ABDM-CB][hi-request] missing required field(s) "
+            "(consent_id=%s data_push_url=%s x_hip_id=%s transaction_id=%s) — cannot process",
+            consent_id, data_push_url, x_hip_id, transaction_id,
+        )
+        return {}
+
+    try:
+        data_flow_service.handle_health_information_request(
+            consent_id=consent_id,
+            transaction_id=transaction_id,
+            hi_request_id=request_id,
+            data_push_url=data_push_url,
+            hiu_key_material=hiu_key_material,
+            hip_id=x_hip_id,
+        )
+    except Exception:
+        logger.exception(
+            "[ABDM-CB][hi-request] data flow errored consent_id=%s transaction_id=%s",
+            consent_id, transaction_id,
+        )
+
+    return {}
+
+
+# ===========================================================================
+# Milestone 3 — HIU inbound callbacks (ABDM → Kokoro as HIU)
+# ===========================================================================
+
+def _hiu_correlation_request_id(response) -> Optional[str]:
+    """Pull our original REQUEST-ID back out of an HIU callback body (response.requestId)."""
+    if isinstance(response, dict):
+        return response.get("requestId")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# 4.3.2 — Consent request on-init
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/hiu/consent/request/on-init", status_code=202)
+def on_hiu_consent_init(
+    body: HiuConsentOnInitPayload,
+    authorization: Optional[str] = Header(None),
+    x_hiu_id: Optional[str] = Header(None, alias="X-HIU-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """ABDM returns the assigned consentRequest.id after a 4.3.1 init. Correlated by response.requestId."""
+    corr_id = _hiu_correlation_request_id(body.response)
+    consent_request_id = (body.consentRequest or {}).get("id")
+    logger.info(
+        "[ABDM-CB][hiu-on-init] corr_request_id=%s consent_request_id=%s x_hiu_id=%s error=%s",
+        corr_id, consent_request_id, x_hiu_id, body.error,
+    )
+    if corr_id:
+        try:
+            hiu_consent_service.record_on_init(corr_id, consent_request_id, body.error)
+        except Exception:
+            logger.exception("[ABDM-CB][hiu-on-init] failed to record corr_id=%s", corr_id)
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# Consent notify — patient approved / denied / revoked
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/hiu/consent/request/notify", status_code=202)
+def on_hiu_consent_notify(
+    body: HiuConsentNotifyPayload,
+    authorization: Optional[str] = Header(None),
+    x_hiu_id: Optional[str] = Header(None, alias="X-HIU-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """
+    Patient acted on the consent request. We persist the granted consentId(s) and
+    acknowledge (4.3.4), echoing this callback's REQUEST-ID back.
+    """
+    notification = body.notification or {}
+    status = notification.get("status")
+    consent_request_id = notification.get("consentRequestId") or notification.get("consentRequestid")
+    artefacts = notification.get("consentArtefacts") or notification.get("consentArtefact") or []
+    consent_ids = [a.get("id") for a in artefacts if isinstance(a, dict) and a.get("id")]
+
+    logger.info(
+        "[ABDM-CB][hiu-notify] consent_request_id=%s status=%s consent_ids=%s x_hiu_id=%s",
+        consent_request_id, status, consent_ids, x_hiu_id,
+    )
+
+    row = None
+    try:
+        row = hiu_consent_service.record_notify(consent_request_id, status, consent_ids)
+    except Exception:
+        logger.exception("[ABDM-CB][hiu-notify] failed to record consent_request_id=%s", consent_request_id)
+
+    # Acknowledge (4.3.4). Resolve hiu_id from the stored row, else the header.
+    hiu_id = (row or {}).get("hiu_id") or x_hiu_id
+    if hiu_id and request_id and consent_ids:
+        try:
+            hiu_consent_service.acknowledge_consent_notify(
+                consent_ids=consent_ids, notify_request_id=request_id, hiu_id=hiu_id
+            )
+        except Exception:
+            logger.exception("[ABDM-CB][hiu-notify] ack failed consent_request_id=%s", consent_request_id)
+    else:
+        logger.warning(
+            "[ABDM-CB][hiu-notify] missing hiu_id/REQUEST-ID/consent_ids — skipping 4.3.4 ack"
+        )
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# 4.3.6 — Consent request on-status
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/hiu/consent/request/on-status", status_code=202)
+def on_hiu_consent_status(
+    body: HiuConsentOnStatusPayload,
+    authorization: Optional[str] = Header(None),
+    x_hiu_id: Optional[str] = Header(None, alias="X-HIU-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """ABDM returns the consent request status after a 4.3.5 poll."""
+    cr = body.consentRequest or {}
+    consent_request_id = cr.get("id")
+    status = cr.get("status")
+    logger.info(
+        "[ABDM-CB][hiu-on-status] consent_request_id=%s status=%s x_hiu_id=%s",
+        consent_request_id, status, x_hiu_id,
+    )
+    try:
+        hiu_consent_service.record_on_status(consent_request_id, status)
+    except Exception:
+        logger.exception("[ABDM-CB][hiu-on-status] failed to record consent_request_id=%s", consent_request_id)
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# 4.3.8 — Consent on-fetch (the granted artefact)
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/hiu/consent/on-fetch", status_code=202)
+def on_hiu_consent_fetch(
+    body: HiuConsentOnFetchPayload,
+    authorization: Optional[str] = Header(None),
+    x_hiu_id: Optional[str] = Header(None, alias="X-HIU-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """ABDM returns the full consent artefact after a 4.3.7 fetch — persisted in ConsentArtefacts."""
+    consent = body.consent or {}
+    detail = consent.get("consentDetail") or {}
+    consent_id = detail.get("consentId") or consent.get("consentId")
+    status = consent.get("status")
+    signature = consent.get("signature")
+    logger.info("[ABDM-CB][hiu-on-fetch] consent_id=%s status=%s x_hiu_id=%s", consent_id, status, x_hiu_id)
+
+    if not consent_id:
+        logger.warning("[ABDM-CB][hiu-on-fetch] missing consentId — cannot persist")
+        return {}
+    try:
+        hiu_consent_service.record_on_fetch(
+            consent_id=consent_id, status=status, consent_detail=detail,
+            signature=signature, hiu_id=x_hiu_id,
+        )
+    except Exception:
+        logger.exception("[ABDM-CB][hiu-on-fetch] failed to persist consent_id=%s", consent_id)
+    return {}
+
+
+# ---------------------------------------------------------------------------
+# 6.3.5 inbound — a HIP pushes encrypted records to our HIU dataPushUrl
+# ---------------------------------------------------------------------------
+
+@router.post("/api/v3/hiu/health-information/transfer", status_code=202)
+def on_hiu_data_transfer(
+    body: HiuDataTransferPayload,
+    authorization: Optional[str] = Header(None),
+    x_hiu_id: Optional[str] = Header(None, alias="X-HIU-ID"),
+    request_id: Optional[str] = Header(None, alias="REQUEST-ID"),
+):
+    """
+    A HIP pushes encrypted FHIR entries here (the dataPushUrl we sent on our HI
+    request). We decrypt with the stored ephemeral private key, persist, and
+    notify the CM (6.3.6). Always returns 202 so ABDM/HIP does not retry.
+    """
+    logger.info(
+        "[ABDM-CB][hiu-transfer] transaction_id=%s entries=%s x_hiu_id=%s",
+        body.transactionId, len(body.entries or []), x_hiu_id,
+    )
+    try:
+        hiu_data_service.handle_data_transfer(
+            transaction_id=body.transactionId,
+            entries=body.entries or [],
+            hip_key_material=body.keyMaterial or {},
+        )
+    except Exception:
+        logger.exception("[ABDM-CB][hiu-transfer] data transfer errored transaction_id=%s", body.transactionId)
     return {}

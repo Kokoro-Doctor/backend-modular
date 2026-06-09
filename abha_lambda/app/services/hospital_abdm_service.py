@@ -144,6 +144,36 @@ def get_by_hip_id(hip_id: str) -> Optional[dict]:
     return items[0] if items else None
 
 
+def get_by_hiu_id(hiu_id: str) -> Optional[dict]:
+    """
+    Find the hospital record by ABDM HIU service ID (M3 callback routing — ABDM
+    sends X-HIU-ID). Tries the hiu_id-index GSI first; falls back to hip_id-index
+    because in the sandbox a single serviceId usually acts as both HIP and HIU.
+    """
+    try:
+        resp = config.hospital_abdm_table.query(
+            IndexName="hiu_id-index",
+            KeyConditionExpression="hiu_id = :hid",
+            ExpressionAttributeValues={":hid": hiu_id},
+            Limit=1,
+        )
+        items = resp.get("Items", [])
+        if items:
+            return items[0]
+    except Exception:
+        # GSI may not exist on older stacks — fall through to hip_id lookup
+        logger.debug("[HospitalAbdmService] hiu_id-index query failed; falling back to hip_id")
+    return get_by_hip_id(hiu_id)
+
+
+def resolve_hiu_id(record: dict) -> str:
+    """
+    Return the ABDM HIU service ID for a hospital config record.
+    Falls back to hip_id when hiu_id is unset (sandbox services act as both).
+    """
+    return record.get("hiu_id") or record["hip_id"]
+
+
 def list_all() -> list:
     """Return all hospital ABDM config records (for admin use)."""
     resp = config.hospital_abdm_table.scan()

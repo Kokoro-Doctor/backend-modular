@@ -2,42 +2,195 @@
 
 ABDM (Ayushman Bharat Digital Mission) integration: ABHA creation/login, profile & card, HIP-initiated record linking, and inbound ABDM webhooks. Routes are deployed on the ABHA Lambda (`/abha/*` and fixed ABDM callback paths).
 
-**Token model:** ABDM user tokens are stored in the **AbhaAccounts** DynamoDB table by the backend. The frontend does **not** send `X-ABHA-Token`. After create/login verify, tokens are persisted server-side keyed by `abha_number`. Profile and card look up the stored ABDM token directly by `abha_number` (passed as a query param) and auto-refresh if expired. **No Kokoro JWT is required on any ABHA endpoint.**
+**Token model:** ABDM user tokens are stored in the **AbhaAccounts** DynamoDB table by the backend keyed by `abha_number`. Profile and card look up the stored ABDM token directly by `abha_number` (passed as a query param) and auto-refresh if expired. **No auth is required on any ABHA endpoint.**
 
-**Multi-hospital support (Flow D):** Kokoro acts as an HRP (Health Record Provider / bridge) for multiple hospitals. Each hospital has a unique `hip_id` (ABDM service ID) stored in the **HospitalAbdmConfig** DynamoDB table. All HIP-initiated linking calls must provide `hospital_id` (Kokoro's internal hospital UUID) so the correct `X-HIP-ID` header is used when calling ABDM. Link tokens are scoped per hospital — a patient can have active link tokens from multiple hospitals simultaneously.
+**Multi-hospital support:** Kokoro acts as an HRP bridge for multiple hospitals. Each hospital has a unique `hip_id` stored in **HospitalAbdmConfig**. All HIP-initiated linking calls must include `hospital_id` so the correct `X-HIP-ID` header is sent to ABDM. Link tokens are hospital-scoped.
 
-**Async transaction tracking:** HIP linking APIs are callback-based. Each outbound call (`generate-token`, `care-context`) writes a **PENDING** row to the **AbdmTransactions** DynamoDB table keyed by `request_id` (the `REQUEST-ID` sent to ABDM). Webhooks flip the row to **COMPLETED** or **FAILED** using `response.requestId` from the callback body (not the callback's `REQUEST-ID` header). Use **`GET /abha/transactions`** to inspect status and payloads.
-
-**Flows:**
-
-- **Flow A** — Create new ABHA via Aadhaar OTP (`POST /abha/create/*`)
-- **Flow B** — Login with existing ABHA number (`POST /abha/login/*`)
-- **Flow C** — Profile & card (`GET /abha/profile`, `GET /abha/card`) — **`abha_number` query param required, no auth**
-- **Flow D** — HIP-initiated linking (`POST /abha/link/*`, bridge admin, `GET /abha/transactions`)
-- **Flow E** — ABDM → Kokoro webhooks (inbound callbacks; paths fixed by ABDM spec)
+**Async transaction tracking:** HIP linking calls (`generate-token`, `care-context`) write a **PENDING** row to **AbdmTransactions** keyed by `request_id`. ABDM callbacks flip the row to **COMPLETED** or **FAILED**. Use `GET /abha/transactions` to monitor status.
 
 ---
 
-## Flow A — Create ABHA (Aadhaar)
+## Phase 0 — One-Time Platform Setup
 
-### POST `/abha/create/request-otp`
+Run these once per environment (dev/staging/prod) before anything else.
 
-Step 1: Request OTP on the mobile linked to Aadhaar. No auth required.
+---
 
-**Auth required:** No
+### 1. PATCH `/abha/bridge/url`
 
-**Request body:**
+Register Kokoro's deployed API base URL with ABDM. ABDM will POST all async callbacks to `{url}/api/v3/hip/...` and `{url}/api/v3/link/...`.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** PATCH
+- **URL:** `{{base_url}}/abha/bridge/url`
+- **Headers:**
+
+```
+Content-Type: application/json
+```
+
+- **Body (raw JSON):**
+
 ```json
 {
-  "aadhaar": "123456789012"
+  "url": "https://api.example.com"
 }
 ```
 
+**Success response (200):**
+
+```json
+{
+  "message": "Bridge URL updated to https://api.example.com"
+}
+```
+
+**Error responses:**
+
+- `400` — Invalid or malformed URL
+- `500` — Database error
+
+**Important notes:**
+
+- Must be an HTTPS URL accessible from ABDM systems
+- ABDM will POST to `{url}/api/v3/hip/token/on-generate-token`, `{url}/api/v3/link/on_carecontext`, etc.
+- Call once per environment — calling again just updates the URL
+
+---
+
+### 2. POST `/abha/bridge/register-facility`
+
+Register a hospital/facility with ABDM and store its config in Kokoro. Run once per hospital onboarding.
+
+**Auth required:** None
+
 **Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/bridge/register-facility`
+- **Headers:**
+
+```
+Content-Type: application/json
+```
+
+- **Body (raw JSON):**
+
+```json
+{
+  "hospital_id": "hosp-uuid-789",
+  "facility_id": "IN2810014366",
+  "facility_name": "City Hospital",
+  "bridge_id": "SBX_KOKORO",
+  "hip_name": "CITYHOSPITAL01",
+  "service_type": "HIP",
+  "active": true
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "message": "Facility IN2810014366 registered successfully.",
+  "hospital_id": "hosp-uuid-789",
+  "hip_id": "CITYHOSPITAL01"
+}
+```
+
+**Error responses:**
+
+- `400` — Invalid data or `hip_name` already exists
+- `500` — ABDM registration error
+
+**Field reference:**
+
+| Field           | Description                     | Example          | Notes                                            |
+| --------------- | ------------------------------- | ---------------- | ------------------------------------------------ |
+| `hospital_id`   | Kokoro's internal hospital UUID | `hosp-uuid-789`  | Must be unique within Kokoro                     |
+| `facility_id`   | HFR ID from ABDM                | `IN2810014366`   | ABDM-issued, from registration documents         |
+| `facility_name` | Hospital/clinic display name    | `City Hospital`  | Human-readable, for logging                      |
+| `bridge_id`     | Kokoro's ABDM bridge identifier | `SBX_KOKORO`     | Dev/staging: `SBX_KOKORO`, Prod: varies          |
+| `hip_name`      | ABDM service ID / X-HIP-ID      | `CITYHOSPITAL01` | ≤15 chars, alphanumeric, **unique per facility** |
+| `service_type`  | Service type                    | `HIP`            | Always `HIP`                                     |
+| `active`        | Enable/disable                  | `true`           | Set to `false` to deactivate                     |
+
+**Important notes:**
+
+- **Save `hospital_id`** — use it in all Phase 2 linking calls
+- `hip_name` becomes the `X-HIP-ID` header sent to ABDM on every HIP call
+- Must be ≤15 characters, alphanumeric only (no spaces or special chars)
+
+---
+
+### 3. GET `/abha/bridge/hospitals`
+
+Verify all registered hospitals and their ABDM config.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/bridge/hospitals`
+- **Headers:** None required
+- **Body:** (none)
+
+**Success response (200):**
+
+```json
+{
+  "hospitals": [
+    {
+      "hospital_id": "hosp-uuid-123",
+      "facility_id": "IN2810014366",
+      "facility_name": "City Hospital",
+      "bridge_id": "SBX_KOKORO",
+      "hip_id": "CITYHOSPITAL01",
+      "hip_name": "CITYHOSPITAL01",
+      "abdm_status": "registered",
+      "created_at": "2025-05-27T10:15:00.000Z",
+      "updated_at": "2025-05-27T10:15:00.000Z"
+    }
+  ],
+  "count": 1
+}
+```
+
+**Error responses:**
+
+- `500` — Database error
+
+**Useful for:** Confirming `hospital_id` before calling Phase 2 endpoints, debugging `X-HIP-ID` issues.
+
+---
+
+## Phase 1 — ABHA User Onboarding
+
+Two options depending on whether the user is new to ABHA or already has one.
+
+---
+
+### Option A — New ABHA Creation (via Aadhaar OTP)
+
+---
+
+#### 4. POST `/abha/create/request-otp`
+
+Request OTP to the mobile linked to the user's Aadhaar. The OTP is sent by ABDM.
+
+**Auth required:** None
+
+**Postman setup:**
+
 - **Method:** POST
 - **URL:** `{{base_url}}/abha/create/request-otp`
 - **Headers:** None required
 - **Body (raw JSON):**
+
 ```json
 {
   "aadhaar": "123456789012"
@@ -45,6 +198,7 @@ Step 1: Request OTP on the mobile linked to Aadhaar. No auth required.
 ```
 
 **Success response (200):**
+
 ```json
 {
   "txn_id": "abc123-txn-id-from-abdm",
@@ -53,27 +207,31 @@ Step 1: Request OTP on the mobile linked to Aadhaar. No auth required.
 ```
 
 **Error responses:**
+
 - `400` — Invalid Aadhaar format or Aadhaar not linked to mobile
 - `500` — ABDM service error
 
 **Important notes:**
+
 - Aadhaar is encrypted server-side before calling ABDM
-- Use `txn_id` from response in the next step
-- OTP is sent to the mobile number registered with ABDM/Aadhaar
+- **Save `txn_id`** — required in the next step
+- OTP is sent to the mobile registered with Aadhaar/ABDM
 
 ---
 
-### POST `/abha/create/verify-otp`
+#### 5. POST `/abha/create/verify-otp`
 
-Step 2: Verify OTP and create or retrieve the ABHA account. Saves profile + tokens to **AbhaAccounts** keyed by `abha_number`.
+Verify the OTP and create or retrieve the ABHA account. Saves profile + tokens to **AbhaAccounts**.
 
 **Auth required:** None
 
 **Postman setup:**
+
 - **Method:** POST
 - **URL:** `{{base_url}}/abha/create/verify-otp`
 - **Headers:** None required
 - **Body (raw JSON):**
+
 ```json
 {
   "txn_id": "abc123-txn-id-from-abdm",
@@ -83,6 +241,7 @@ Step 2: Verify OTP and create or retrieve the ABHA account. Saves profile + toke
 ```
 
 **Success response (200):**
+
 ```json
 {
   "message": "ABHA created successfully",
@@ -107,36 +266,126 @@ Step 2: Verify OTP and create or retrieve the ABHA account. Saves profile + toke
 ```
 
 **Error responses:**
+
 - `400` — Invalid OTP, txn_id not found, or OTP expired
 - `500` — Database or ABDM service error
 
 **Important notes:**
-- `txn_id` must be from the previous `/create/request-otp` call
-- **Save the `abha_number` from the response** — you'll need it for `/abha/profile` and `/abha/card`
-- `tokens` are returned for client visibility but the backend stores and auto-refreshes them
+
+- `txn_id` must be from the previous step
+- **Save `abha_number` from the response** — needed for profile and card
 
 ---
 
-## Flow B — Login with existing ABHA
+#### 6. GET `/abha/profile` _(optional)_
 
-### POST `/abha/login/request-otp`
+Fetch the live ABHA profile from ABDM using the `abha_number` from step 5.
 
-Step 1: Request OTP for an existing ABHA number. No auth required.
+**Auth required:** None
 
-**Auth required:** No
+**Postman setup:**
 
-**Request body:**
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/profile?abha_number={{abha_number}}`
+- **Headers:** None required
+- **Body:** (none)
+
+**Example:**
+
+```
+GET {{base_url}}/abha/profile?abha_number=12-3456-7890-1234
+```
+
+**Success response (200):**
+
 ```json
 {
-  "abha_number": "12-3456-7890-1234"
+  "abha_profile": {
+    "ABHANumber": "12-3456-7890-1234",
+    "preferredAbhaAddress": "john.doe@abdm",
+    "firstName": "John",
+    "lastName": "Doe",
+    "mobile": "9587733170",
+    "gender": "M",
+    "dob": "1990-01-15",
+    "abhaStatus": "ACTIVE"
+  }
 }
 ```
 
+**Error responses:**
+
+- `400` — `abha_number` query param missing
+- `404` — No record found for this `abha_number` (run create or login first)
+- `401` — Stored ABDM tokens expired (re-run the OTP flow)
+- `500` — ABDM service error
+
+**Important notes:**
+
+- Returns **live data from ABDM**, not cached
+- All profile fields are read-only from ABDM
+
+---
+
+#### 7. GET `/abha/card` _(optional)_
+
+Download the official ABHA card as a Base64-encoded PDF.
+
+**Auth required:** None
+
 **Postman setup:**
+
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/card?abha_number={{abha_number}}`
+- **Headers:** None required
+- **Body:** (none)
+
+**Example:**
+
+```
+GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
+```
+
+**Success response (200):**
+
+```json
+{
+  "card_base64": "JVBERi0xLjQKJeLjz9MNCjEgMCBvYmogICUgRW50cnkgcG9pbnQ..."
+}
+```
+
+**Error responses:**
+
+- `400` — `abha_number` query param missing
+- `404` — No record found for this `abha_number`
+- `401` — Stored ABDM tokens expired
+- `500` — ABDM service error
+
+**Important notes:**
+
+- `card_base64` is a complete PDF file encoded as Base64
+- **To decode in terminal:** `echo 'JVBERi...' | base64 -d > card.pdf && open card.pdf`
+- The PDF contains the official ABHA card with QR code
+
+---
+
+### Option B — Login with Existing ABHA
+
+---
+
+#### 4. POST `/abha/login/request-otp`
+
+Request OTP for an existing ABHA number. OTP is sent to the mobile registered with that ABHA.
+
+**Auth required:** None
+
+**Postman setup:**
+
 - **Method:** POST
 - **URL:** `{{base_url}}/abha/login/request-otp`
 - **Headers:** None required
 - **Body (raw JSON):**
+
 ```json
 {
   "abha_number": "12-3456-7890-1234"
@@ -144,6 +393,7 @@ Step 1: Request OTP for an existing ABHA number. No auth required.
 ```
 
 **Success response (200):**
+
 ```json
 {
   "txn_id": "def456-txn-id-from-abdm",
@@ -152,27 +402,31 @@ Step 1: Request OTP for an existing ABHA number. No auth required.
 ```
 
 **Error responses:**
+
 - `400` — Invalid ABHA number format
 - `404` — ABHA number not found in ABDM
 - `500` — ABDM service error
 
 **Important notes:**
+
 - ABHA number format: `XX-XXXX-XXXX-XXXX` (12 digits with hyphens)
-- Use `txn_id` from response in the next step
+- **Save `txn_id`** — required in the next step
 
 ---
 
-### POST `/abha/login/verify-otp`
+#### 5. POST `/abha/login/verify-otp`
 
-Step 2: Verify OTP and log in to ABHA. Saves profile + tokens to **AbhaAccounts** keyed by `abha_number`.
+Verify OTP and log in to ABHA. Saves fresh profile + tokens to **AbhaAccounts**.
 
 **Auth required:** None
 
 **Postman setup:**
+
 - **Method:** POST
 - **URL:** `{{base_url}}/abha/login/verify-otp`
 - **Headers:** None required
 - **Body (raw JSON):**
+
 ```json
 {
   "txn_id": "def456-txn-id-from-abdm",
@@ -181,6 +435,7 @@ Step 2: Verify OTP and log in to ABHA. Saves profile + tokens to **AbhaAccounts*
 ```
 
 **Success response (200):**
+
 ```json
 {
   "message": "Login verified",
@@ -202,139 +457,66 @@ Step 2: Verify OTP and log in to ABHA. Saves profile + tokens to **AbhaAccounts*
 ```
 
 **Error responses:**
+
 - `400` — Invalid OTP or txn_id not found
 - `500` — Database or ABDM service error
 
 **Important notes:**
-- `txn_id` must be from the previous `/login/request-otp` call
-- **Save the `abha_number` from the response** — you'll need it for `/abha/profile` and `/abha/card`
-- Token expiry: 30 minutes for access token, 15 days for refresh token
+
+- `txn_id` must be from the previous step
+- **Save `abha_number` from the response** — needed for steps 6 and 7
+- Token expiry: 30 min (access), 15 days (refresh)
 
 ---
 
-## Flow C — Profile & card
+#### 6. GET `/abha/profile` _(optional)_
 
-Both endpoints use `abha_number` as a query parameter — no auth needed. The backend:
-1. Receives `abha_number` from query param
-2. Looks up stored ABDM token directly from **AbhaAccounts** table (by PK)
-3. Auto-refreshes the token if expired
-4. Calls ABDM and returns fresh data
+Same as Option A step 6. Use `abha_number` from the login response above.
 
-**Auth required:** None
-
----
-
-### GET `/abha/profile`
-
-Fetch live ABHA profile from ABDM.
-
-**Postman setup:**
-- **Method:** GET
-- **URL:** `{{base_url}}/abha/profile?abha_number={{abha_number}}`
-- **Headers:** None required
-- **Body:** (none)
-
-**Example URL:**
 ```
 GET {{base_url}}/abha/profile?abha_number=12-3456-7890-1234
 ```
 
-**Success response (200):**
-```json
-{
-  "abha_profile": {
-    "ABHANumber": "12-3456-7890-1234",
-    "preferredAbhaAddress": "john.doe@abdm",
-    "firstName": "John",
-    "lastName": "Doe",
-    "mobile": "9587733170",
-    "gender": "M",
-    "dob": "1990-01-15",
-    "abhaStatus": "ACTIVE"
-  }
-}
-```
-
-**Error responses:**
-- `400` — `abha_number` query param missing
-- `404` — No ABHA record found for this `abha_number` (run create or login first)
-- `401` — Stored ABDM tokens expired (user must OTP again via create/login)
-- `500` — ABDM service error
-
-**Important notes:**
-- Returns **live data from ABDM**, not cached data
-- `abha_number` must have been saved via `/create/verify-otp` or `/login/verify-otp` first
-- All profile fields are read-only from ABDM
+See [Option A step 6](#6-get-abhaprofile-optional) for full request/response details.
 
 ---
 
-### GET `/abha/card`
+#### 7. GET `/abha/card` _(optional)_
 
-Download ABHA card as a PDF (returned as Base64).
+Same as Option A step 7. Use `abha_number` from the login response above.
 
-**Postman setup:**
-- **Method:** GET
-- **URL:** `{{base_url}}/abha/card?abha_number={{abha_number}}`
-- **Headers:** None required
-- **Body:** (none)
-
-**Example URL:**
 ```
 GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
 ```
 
-**Success response (200):**
-```json
-{
-  "card_base64": "JVBERi0xLjQKJeLjz9MNCjEgMCBvYmogICUgRW50cnkgcG9pbnQKPDwgL1R5cGUgL0NhdGFsb2cgL1BhZ2VzIDIgMCBSID4+CmVuZG9iagoyIDAgb2JqCjw8IC9UeXBlIC9QYWdlcyAvS2lkcyBbMyAwIFJdIC9Db3VudCAxID4+CmVuZG9iag..."
-}
-```
-
-**Error responses:**
-- `400` — `abha_number` query param missing
-- `404` — No ABHA record found for this `abha_number`
-- `401` — Stored ABDM tokens expired (user must OTP again)
-- `500` — ABDM service error
-
-**Important notes:**
-- `card_base64` is a complete PDF file encoded as Base64
-- **To decode in terminal:** `echo 'JVBERi...' | base64 -d > card.pdf && open card.pdf`
-- The PDF contains the official ABHA card with QR code
+See [Option A step 7](#7-get-abhacard-optional) for full request/response details.
 
 ---
 
-## Flow D — HIP-initiated linking (Milestone 2)
+## Phase 2 — HIP-Initiated Linking (Milestone 2)
 
-**Overview:** Hospital initiates record linking with ABDM. All calls are **asynchronous**:
-1. Backend calls ABDM with `REQUEST-ID` header
-2. Returns **200** with `request_id` immediately (for tracking)
-3. ABDM processes async and POSTs callback to your webhook (`/api/v3/hip/...`)
-4. Webhook updates **AbdmTransactions** table
-
-**Key sequence:**
-1. **Register hospital** via `POST /abha/bridge/register-facility` (admin, once per hospital)
-2. **Generate token** via `POST /abha/link/generate-token` → wait for webhook
-3. **Link care contexts** via `POST /abha/link/care-context` → wait for webhook
-4. **Monitor status** via `GET /abha/transactions?request_id=<id>`
-
-**Auth required for all Flow D routes:** None — no auth headers are checked by any endpoint in this flow
+Hospital initiates record linking with ABDM. All linking calls are **asynchronous** — Kokoro returns `request_id` immediately and ABDM POSTs the result back to the registered webhook. Requires Phase 0 setup (hospital registered, bridge URL set).
 
 ---
 
-### POST `/abha/link/generate-token`
+### 8. POST `/abha/link/generate-token`
 
-Request a link token for a patient. ABDM sends the token back to your webhook `/api/v3/hip/token/on-generate-token`. Provide **either** `abha_address` **or** `abha_number`, not both.
+Ask ABDM to generate a link token for a patient at a specific hospital. ABDM calls back to `/api/v3/hip/token/on-generate-token` with the token.
 
 **Auth required:** None
 
-**Postman setup (using ABHA address):**
+**Postman setup:**
+
 - **Method:** POST
 - **URL:** `{{base_url}}/abha/link/generate-token`
 - **Headers:**
+
 ```
 Content-Type: application/json
 ```
-- **Body (raw JSON):**
+
+- **Body using ABHA address (preferred):**
+
 ```json
 {
   "hospital_id": "hosp-uuid-123",
@@ -345,18 +527,20 @@ Content-Type: application/json
 }
 ```
 
-**Postman setup (using ABHA number instead):**
+- **Body using ABHA number instead:**
+
 ```json
 {
-  "hospital_id": "hosp-uuid-456",
+  "hospital_id": "hosp-uuid-123",
   "abha_number": "12-3456-7890-1234",
   "name": "John Doe",
-  "gender": "F",
-  "year_of_birth": 1985
+  "gender": "M",
+  "year_of_birth": 1990
 }
 ```
 
 **Success response (200):**
+
 ```json
 {
   "message": "Link token generation request accepted. Token will be available shortly.",
@@ -368,227 +552,69 @@ Content-Type: application/json
 ```
 
 **Error responses:**
+
 - `400` — Neither `abha_address` nor `abha_number` provided
-- `404` — `hospital_id` not found (register hospital first)
+- `404` — `hospital_id` not found (run Phase 0 setup first)
 - `403` — Hospital ABDM status is `inactive`
 - `500` — ABDM service error
 
 **Important notes:**
-- `hospital_id` must be registered first via `POST /abha/bridge/register-facility`
-- Gender values: `M`, `F`, `O` (other)
-- `year_of_birth` must be a valid year (e.g., 1990)
-- **Keep the `request_id` to track this request**
-- Poll `GET /abha/transactions?request_id=<request_id>` to check when ABDM responds
-- Link token arrives at your webhook and is auto-stored in DB
-- Link token is **hospital-scoped** — use same `hospital_id` for next step
+
+- Provide `abha_address` **or** `abha_number`, not both
+- Gender values: `M`, `F`, `O`
+- **Save `request_id`** — use it in step 10 to check status
+- Link token is hospital-scoped — use same `hospital_id` in step 11
 
 ---
 
-### POST `/abha/link/care-context`
+### 9. POST `/api/v3/hip/token/on-generate-token` ← ABDM → Kokoro callback
 
-Link care contexts (medical records) to a patient's ABHA for a specific hospital. Requires a valid link token from the previous `generate-token` call.
+ABDM POSTs the link token here after processing step 8. **You do not call this — ABDM does.**
+
+**Triggered by:** ABDM after a successful `generate-token` request
+
+**What ABDM sends:**
+
+```
+POST {bridge_url}/api/v3/hip/token/on-generate-token
+X-HIP-ID: CITYHOSPITAL01
+REQUEST-ID: <new-uuid>
+TIMESTAMP: 2025-05-27T10:16:30Z
+
+{
+  "abhaAddress": "john.doe@abdm",
+  "linkToken": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+  "response": {
+    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  }
+}
+```
+
+**What Kokoro does automatically:**
+
+1. Validates `X-HIP-ID` header
+2. Stores `linkToken` in **AbhaAccounts** keyed by `abhaAddress` + `hip_id`
+3. Updates **AbdmTransactions** row to `COMPLETED` (matched by `response.requestId`)
+4. Returns `{}` HTTP `202`
+
+**To verify it arrived:** Use step 10 below.
+
+---
+
+### 10. GET `/abha/transactions` — Check token generation status
+
+Poll this after step 8 to confirm ABDM sent the link token callback.
 
 **Auth required:** None
 
 **Postman setup:**
-- **Method:** POST
-- **URL:** `{{base_url}}/abha/link/care-context`
-- **Headers:**
-```
-Content-Type: application/json
-```
-- **Body (raw JSON):**
-```json
-{
-  "hospital_id": "hosp-uuid-123",
-  "abha_address": "john.doe@abdm",
-  "abha_number": "12-3456-7890-1234",
-  "patient": [
-    {
-      "referenceNumber": "PAT-001",
-      "display": "John Doe",
-      "hiType": "OPConsultation",
-      "count": 1,
-      "careContexts": [
-        {
-          "referenceNumber": "CC-2025-001",
-          "display": "OPD Consultation on 15 Jan 2025"
-        },
-        {
-          "referenceNumber": "CC-2025-002",
-          "display": "Blood Work on 20 Jan 2025"
-        }
-      ]
-    }
-  ]
-}
-```
 
-**Success response (200):**
-```json
-{
-  "message": "Care context linking request accepted.",
-  "request_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-  "hospital_id": "hosp-uuid-123",
-  "abha_address": "john.doe@abdm"
-}
-```
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/transactions?request_id={{request_id}}`
+- **Headers:** None required
 
-**Error responses:**
-- `409` — No link token for this patient at this hospital (call `/link/generate-token` first)
-- `404` — Hospital not registered or `abha_number` cannot be resolved from `abha_address`
-- `403` — Hospital ABDM registration is `inactive`
-- `400` — Invalid patient/care context data structure
-- `500` — ABDM service error
+**Success response — COMPLETED (token received):**
 
-**Important notes:**
-- **MUST use the same `hospital_id` as in the `/link/generate-token` call**
-- Provide either `abha_address` or both `abha_address` and `abha_number`
-- `hiType` values: `PRESCRIPTION`, `DiagnosticReport`, `OPConsultation`, `LabReport`, `DischargeSummary`, etc.
-- `count` = number of care contexts for this health info type
-- Can link multiple care contexts in one call
-- **Keep the `request_id` to track this request**
-- Poll `GET /abha/transactions?request_id=<request_id>` to check ABDM response
-- Success callback arrives at `/api/v3/link/on_carecontext`
-
----
-
-### PATCH `/abha/bridge/url`
-
-**Admin setup (one-time per environment).** Register Kokoro's API base URL as the ABDM bridge callback endpoint. ABDM will POST all async callbacks to `{url}/api/v3/hip/...` and `{url}/api/v3/link/...`.
-
-**Auth required:** None
-
-**Postman setup:**
-- **Method:** PATCH
-- **URL:** `{{base_url}}/abha/bridge/url`
-- **Headers:**
-```
-Content-Type: application/json
-```
-- **Body (raw JSON):**
-```json
-{
-  "url": "https://api.example.com"
-}
-```
-
-**Success response (200):**
-```json
-{
-  "message": "Bridge URL updated to https://api.example.com"
-}
-```
-
-**Error responses:**
-- `400` — Invalid or malformed URL
-- `500` — Database error
-
-**Important notes:**
-- Call this **once per environment** (dev/staging/prod)
-- ABDM will use this URL as base and POST to: `{url}/api/v3/hip/token/on-generate-token`, `{url}/api/v3/link/on_carecontext`, etc.
-- Must be an HTTPS URL accessible from ABDM systems
-- Store in **BridgeConfig** DynamoDB table
-
----
-
-### POST `/abha/bridge/register-facility`
-
-**Admin setup (once per hospital).** Register a health facility with ABDM and store config in Kokoro. This creates the hospital's ABDM bridge credentials.
-
-**Auth required:** None
-
-**Postman setup:**
-- **Method:** POST
-- **URL:** `{{base_url}}/abha/bridge/register-facility`
-- **Headers:**
-```
-Content-Type: application/json
-```
-- **Body (raw JSON):**
-```json
-{
-  "hospital_id": "hosp-uuid-789",
-  "facility_id": "IN2810014366",
-  "facility_name": "City Hospital",
-  "bridge_id": "SBX_KOKORO",
-  "hip_name": "CITYHOSPITAL01",
-  "service_type": "HIP",
-  "active": true
-}
-```
-
-**Success response (200):**
-```json
-{
-  "message": "Facility IN2810014366 registered successfully.",
-  "hospital_id": "hosp-uuid-789",
-  "hip_id": "CITYHOSPITAL01"
-}
-```
-
-**Error responses:**
-- `400` — Invalid data or `hip_name` already exists
-- `500` — ABDM registration error
-
-**Field reference:**
-| Field | Description | Example | Notes |
-|-------|-------------|---------|-------|
-| `hospital_id` | Kokoro's internal hospital UUID | `hosp-uuid-789` | Must be unique within Kokoro |
-| `facility_id` | HFR ID from ABDM | `IN2810014366` | ABDM-issued, from registration documents |
-| `facility_name` | Hospital/clinic display name | `City Hospital` | Human-readable, for logging |
-| `bridge_id` | Kokoro's ABDM bridge identifier | `SBX_KOKORO` | Dev/staging: SBX_KOKORO, Prod: varies |
-| `hip_name` | ABDM service ID / X-HIP-ID | `CITYHOSPITAL01` | ≤15 chars, alphanumeric, **unique per facility** |
-| `service_type` | Service type | `HIP` | Usually `HIP` |
-| `active` | Enable/disable | `true` | Set to `false` to deactivate |
-
-**Important notes:**
-- **Save `hospital_id` and `hip_name`** — use `hospital_id` in all subsequent Flow D calls
-- `hip_name` becomes the `X-HIP-ID` header sent to ABDM in all HIP calls
-- Must be ≤15 characters, alphanumeric only (no spaces or special chars)
-- Once registered, you can call `/link/generate-token` and `/link/care-context` with this `hospital_id`
-- Stored in **HospitalAbdmConfig** DynamoDB table
-
----
-
-### GET `/abha/transactions`
-
-**Admin monitoring.** Inspect async ABDM request/callback state from **AbdmTransactions** table. Use to confirm ABDM responses or debug stuck requests.
-
-**Auth required:** None
-
-**Query parameters (all optional):**
-
-| Param | Type | Description | Example |
-|-------|------|-------------|---------|
-| `request_id` | string | Get single transaction with full details | `a1b2c3d4-e5f6-7890-abcd-ef1234567890` |
-| `hip_id` | string | Filter by hospital (uses GSI, newest first) | `CITYHOSPITAL01` |
-| `status` | string | Filter: `PENDING` \| `COMPLETED` \| `FAILED` | `PENDING` |
-| `limit` | int | Max rows to return (default: 50, max: 100) | `20` |
-
-**Postman examples:**
-
-Get single transaction by request_id:
-```
-GET {{base_url}}/abha/transactions?request_id=a1b2c3d4-e5f6-7890-abcd-ef1234567890
-```
-
-List all pending requests for a hospital:
-```
-GET {{base_url}}/abha/transactions?hip_id=CITYHOSPITAL01&status=PENDING
-```
-
-List all failed transactions (last 20):
-```
-GET {{base_url}}/abha/transactions?status=FAILED&limit=20
-```
-
-List recent transactions (default):
-```
-GET {{base_url}}/abha/transactions?limit=50
-```
-
-**Success response (single transaction):**
 ```json
 {
   "transaction": {
@@ -618,196 +644,121 @@ GET {{base_url}}/abha/transactions?limit=50
 }
 ```
 
-**Success response (list):**
+**Success response — still PENDING:**
+
 ```json
 {
-  "transactions": [
-    {
-      "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-      "api": "generate-token",
-      "hospital_id": "hosp-uuid-123",
-      "hip_id": "CITYHOSPITAL01",
-      "status": "COMPLETED",
-      "created_at": "2025-05-27T10:15:00.000Z"
-    },
-    {
-      "request_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
-      "api": "link-carecontext",
-      "hospital_id": "hosp-uuid-456",
-      "hip_id": "CITYHOSPITAL02",
-      "status": "PENDING",
-      "created_at": "2025-05-27T10:20:00.000Z"
-    }
-  ],
-  "count": 2
-}
-```
-
-**Error responses:**
-- `404` — `request_id` not found
-- `500` — Database error
-
-**Status reference:**
-- `PENDING` — Request sent to ABDM, waiting for callback
-- `COMPLETED` — ABDM callback received successfully
-- `FAILED` — ABDM callback received with error
-
-**Important notes:**
-- `api` values: `generate-token` or `link-carecontext`
-- Row stuck in `PENDING` = webhook not received or correlation failed
-- `callback_received_at` shows when webhook arrived (in COMPLETED/FAILED rows)
-- Use `request_id` from `/link/generate-token` or `/link/care-context` responses to track requests
-- Check `callback_payload` to see ABDM's response (token, error code, etc.)
-
----
-
-### GET `/abha/bridge/hospitals`
-
-**Admin view.** List all registered hospitals and their ABDM config.
-
-**Auth required:** None
-
-**Postman setup:**
-- **Method:** GET
-- **URL:** `{{base_url}}/abha/bridge/hospitals`
-- **Headers:** None required
-- **Body:** (none)
-
-**Success response (200):**
-```json
-{
-  "hospitals": [
-    {
-      "hospital_id": "hosp-uuid-123",
-      "facility_id": "IN2810014366",
-      "facility_name": "City Hospital",
-      "bridge_id": "SBX_KOKORO",
-      "hip_id": "CITYHOSPITAL01",
-      "hip_name": "CITYHOSPITAL01",
-      "abdm_status": "registered",
-      "created_at": "2025-05-27T10:15:00.000Z",
-      "updated_at": "2025-05-27T10:15:00.000Z"
-    },
-    {
-      "hospital_id": "hosp-uuid-456",
-      "facility_id": "IN2810014367",
-      "facility_name": "Apollo Hospital",
-      "bridge_id": "SBX_KOKORO",
-      "hip_id": "APOLLOHOSPITAL",
-      "hip_name": "APOLLOHOSPITAL",
-      "abdm_status": "registered",
-      "created_at": "2025-05-28T14:20:00.000Z",
-      "updated_at": "2025-05-28T14:20:00.000Z"
-    }
-  ],
-  "count": 2
-}
-```
-
-**Error responses:**
-- `500` — Database error
-
-**Field reference:**
-| Field | Description |
-|-------|-------------|
-| `hospital_id` | Kokoro's internal hospital UUID (use this in `/link/*` calls) |
-| `facility_id` | ABDM HFR facility ID |
-| `facility_name` | Hospital display name |
-| `bridge_id` | Kokoro's ABDM bridge ID |
-| `hip_id` | ABDM service ID (used as X-HIP-ID header) |
-| `hip_name` | Same as hip_id |
-| `abdm_status` | Current registration status with ABDM |
-| `created_at` | Registration timestamp |
-| `updated_at` | Last modification timestamp |
-
-**Useful for:**
-- Verifying hospital registration before calling `/link/*` endpoints
-- Debugging X-HIP-ID issues
-- Finding hospital_id to use in linking flows
-- Checking which hospitals are active
-
----
-
-## Flow E — ABDM webhooks (inbound)
-
-**Receiving callbacks from ABDM.** After you call `/link/generate-token` or `/link/care-context`, ABDM processes async and POSTs results back to these endpoints. Paths are **fixed by ABDM spec** (no `/abha` prefix) and registered via `PATCH /abha/bridge/url`.
-
-**These are NOT meant to be called from Postman.** They are inbound callbacks from ABDM's servers. This section documents what ABDM sends for reference and testing.
-
----
-
-### Webhook headers (from ABDM)
-
-All ABDM callbacks include these headers:
-
-```
-Authorization: Bearer <abdm_gateway_jwt>
-X-HIP-ID: <hip_id>
-REQUEST-ID: <new-uuid-for-this-delivery>
-X-CM-ID: sbx (or prod)
-TIMESTAMP: <ISO 8601 timestamp>
-```
-
-**Header reference:**
-| Header | Description |
-|--------|-------------|
-| `Authorization` | ABDM's JWT for verifying callback authenticity |
-| `X-HIP-ID` | Hospital's service ID — identifies which hospital this callback belongs to |
-| `REQUEST-ID` | Unique ID for this delivery (different from original request) |
-| `X-CM-ID` | Environment: `sbx` (sandbox) or `prod` |
-| `TIMESTAMP` | When ABDM sent the callback |
-
-**Correlation logic:**
-- ABDM echoes your original `REQUEST-ID` in the **JSON body** as `response.requestId`
-- Use `response.requestId` to match callbacks to your original requests
-- The `REQUEST-ID` **header** is just for this delivery and changes on retries
-
----
-
-### POST `/api/v3/hip/token/on-generate-token`
-
-Link token callback from ABDM (ABDM spec 4.3.2). ABDM sends the link token after your `/link/generate-token` request succeeds.
-
-**Expected callback body (from ABDM):**
-```json
-{
-  "abhaAddress": "john.doe@abdm",
-  "linkToken": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-  "response": {
-    "requestId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+  "transaction": {
+    "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "api": "generate-token",
+    "status": "PENDING",
+    "created_at": "2025-05-27T10:15:00.000Z"
   }
 }
 ```
 
-**What Kokoro does:**
-1. Receives POST from ABDM
-2. Validates `X-HIP-ID` header
-3. Stores `linkToken` in **AbhaAccounts** table, keyed by `abhaAddress` + `hip_id` (hospital-scoped)
-4. Updates **AbdmTransactions** row to `COMPLETED` (matched by `response.requestId`)
-5. Returns `{}` with HTTP `202`
+**Error responses:**
 
-**Response Kokoro sends:**
-```
-HTTP 202 Accepted
+- `404` — `request_id` not found
 
-{}
-```
+**Other query params (for bulk monitoring):**
 
-**Testing note:** You cannot test this directly from Postman. ABDM must POST to your registered bridge URL.
+| Param    | Description                                    | Example          |
+| -------- | ---------------------------------------------- | ---------------- |
+| `hip_id` | All transactions for one hospital              | `CITYHOSPITAL01` |
+| `status` | Filter by `PENDING` \| `COMPLETED` \| `FAILED` | `PENDING`        |
+| `limit`  | Max rows (default 50)                          | `20`             |
 
-**Troubleshooting:**
-- Check `GET /abha/transactions?request_id=<original-request-id>` to see if callback was received
-- If still `PENDING` after waiting, the webhook may not have arrived
-- Verify `PATCH /abha/bridge/url` was called to register your callback endpoint
+**When to proceed to step 11:** Only when `status` = `COMPLETED`. If stuck in `PENDING`, verify your bridge URL is correctly registered (step 1) and reachable from ABDM.
 
 ---
 
-### POST `/api/v3/link/on_carecontext`
+### 11. POST `/abha/link/care-context`
 
-Care context linking result from ABDM (ABDM spec 4.3.4). ABDM confirms success or failure of your `/link/care-context` request.
+Link care contexts (medical records) to the patient's ABHA. Uses the link token stored automatically in step 9. Must use the same `hospital_id` as step 8.
 
-**Expected callback body (success):**
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/link/care-context`
+- **Headers:**
+
+```
+Content-Type: application/json
+```
+
+- **Body (raw JSON):**
+
 ```json
+{
+  "hospital_id": "hosp-uuid-123",
+  "abha_address": "john.doe@abdm",
+  "abha_number": "12-3456-7890-1234",
+  "patient": [
+    {
+      "referenceNumber": "PAT-001",
+      "display": "John Doe",
+      "hiType": "OPConsultation",
+      "count": 1,
+      "careContexts": [
+        {
+          "referenceNumber": "CC-2025-001",
+          "display": "OPD Consultation on 15 Jan 2025"
+        },
+        {
+          "referenceNumber": "CC-2025-002",
+          "display": "Blood Work on 20 Jan 2025"
+        }
+      ]
+    }
+  ]
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "message": "Care context linking request accepted.",
+  "request_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+  "hospital_id": "hosp-uuid-123",
+  "abha_address": "john.doe@abdm"
+}
+```
+
+**Error responses:**
+
+- `409` — No valid link token for this patient at this hospital (step 8 not done or token expired)
+- `404` — Hospital not registered or `abha_number` cannot be resolved from `abha_address`
+- `403` — Hospital ABDM registration is `inactive`
+- `400` — Invalid patient/care context structure
+- `500` — ABDM service error
+
+**Important notes:**
+
+- **Must use the same `hospital_id` as step 8**
+- `hiType` values: `PRESCRIPTION`, `DiagnosticReport`, `OPConsultation`, `LabReport`, `DischargeSummary`
+- `count` = total number of care contexts for that `hiType`
+- Can include multiple care contexts per patient in one call
+- **Save `request_id`** — use it in step 13 to check status
+
+---
+
+### 12. POST `/api/v3/link/on_carecontext` ← ABDM → Kokoro callback
+
+ABDM POSTs the linking result here after processing step 11. **You do not call this — ABDM does.**
+
+**Triggered by:** ABDM after processing a `care-context` request
+
+**What ABDM sends (success):**
+
+```
+POST {bridge_url}/api/v3/link/on_carecontext
+X-HIP-ID: CITYHOSPITAL01
+REQUEST-ID: <new-uuid>
+
 {
   "abhaAddress": "john.doe@abdm",
   "status": "Successfully Linked care context",
@@ -817,7 +768,8 @@ Care context linking result from ABDM (ABDM spec 4.3.4). ABDM confirms success o
 }
 ```
 
-**Expected callback body (error):**
+**What ABDM sends (error):**
+
 ```json
 {
   "abhaAddress": "john.doe@abdm",
@@ -831,266 +783,599 @@ Care context linking result from ABDM (ABDM spec 4.3.4). ABDM confirms success o
 }
 ```
 
-**What Kokoro does:**
-1. Receives POST from ABDM
-2. Validates `X-HIP-ID` header (hospital routing)
-3. If `status` = "Successfully Linked..." → updates **AbdmTransactions** to `COMPLETED`
-4. If `error` present → updates **AbdmTransactions** to `FAILED`, stores error details
-5. Returns `{}` with HTTP `202`
+**What Kokoro does automatically:**
 
-**Response Kokoro sends:**
-```
-HTTP 202 Accepted
+1. Validates `X-HIP-ID` header (hospital routing)
+2. If `status` present → marks **AbdmTransactions** row `COMPLETED`
+3. If `error` present → marks row `FAILED`, stores error details
+4. Returns `{}` HTTP `202`
 
-{}
-```
+**Common ABDM error codes:**
 
-**Common error codes:**
-| Code | Meaning | Action |
-|------|---------|--------|
-| `ABDM-1056` | Care context already linked | Check if already linked in ABDM |
-| `ABDM-1050` | Patient not found | Verify ABHA address/number |
+| Code        | Meaning                     | Action                              |
+| ----------- | --------------------------- | ----------------------------------- |
+| `ABDM-1056` | Care context already linked | Check if already linked in ABDM     |
+| `ABDM-1050` | Patient not found           | Verify ABHA address/number          |
 | `ABDM-1055` | Invalid care context format | Check patient/careContext structure |
 
-**Testing note:** Like the token callback, you cannot test this directly from Postman.
-
-**Troubleshooting:**
-- Check `GET /abha/transactions?request_id=<care-context-request-id>` to see callback result
-- Look at `callback_payload` to see full error response from ABDM
-- If still `PENDING`, webhook may not have arrived — check bridge URL registration
+**To verify result:** Use step 13 below.
 
 ---
 
-## Postman Testing Guide
+### 13. GET `/abha/transactions` — Check linking status
 
-### Environment variables to set
+Poll this after step 11 to confirm ABDM confirmed or rejected the care context linking.
 
-Create environment variables in Postman for easy testing. Go to **Environment > Manage Environments > Edit** and add:
+**Auth required:** None
 
-| Variable | Example Value | Purpose |
-|----------|---------------|---------|
-| `base_url` | `http://localhost:8000` | Backend base URL (dev/staging/prod) |
-| `aadhaar` | `123456789012` | Test Aadhaar number |
-| `mobile` | `9587733170` | Mobile linked to Aadhaar |
-| `abha_number` | `12-3456-7890-1234` | ABHA number (save from create/login response) |
-| `abha_address` | `john.doe@abdm` | ABHA address (from profile response) |
-| `hospital_id` | `hosp-uuid-123` | Hospital UUID (from register-facility response) |
-| `hip_id` | `CITYHOSPITAL01` | Hospital's ABDM service ID |
-| `txn_id` | (auto-set by test script) | Transaction ID from request-otp |
-| `request_id` | (auto-set by test script) | Request ID from linking calls |
+**Postman setup:**
+
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/transactions?request_id={{request_id}}`
+- **Headers:** None required
+
+**Response — COMPLETED (linking succeeded):**
+
+```json
+{
+  "transaction": {
+    "request_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "api": "link-carecontext",
+    "hospital_id": "hosp-uuid-123",
+    "hip_id": "CITYHOSPITAL01",
+    "abha_address": "john.doe@abdm",
+    "status": "COMPLETED",
+    "callback_payload": {
+      "abhaAddress": "john.doe@abdm",
+      "status": "Successfully Linked care context",
+      "response": {
+        "requestId": "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+      }
+    },
+    "callback_received_at": "2025-05-27T10:21:00.000Z",
+    "created_at": "2025-05-27T10:20:00.000Z"
+  }
+}
+```
+
+**Response — FAILED (ABDM rejected linking):**
+
+```json
+{
+  "transaction": {
+    "request_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+    "api": "link-carecontext",
+    "status": "FAILED",
+    "callback_payload": {
+      "abhaAddress": "john.doe@abdm",
+      "error": {
+        "code": "ABDM-1056",
+        "message": "This care context has been already linked"
+      },
+      "response": {
+        "requestId": "b2c3d4e5-f6a7-8901-bcde-f12345678901"
+      }
+    },
+    "callback_received_at": "2025-05-27T10:21:00.000Z"
+  }
+}
+```
+
+**Debugging tips:**
+
+- `PENDING` after 30+ seconds → webhook not arriving, check bridge URL registration
+- `FAILED` → read `callback_payload.error.code` against the ABDM error table above
+- For bulk monitoring: `GET /abha/transactions?hip_id=CITYHOSPITAL01&status=FAILED&limit=20`
+
+---
+
+## Phase 3 — HIP Data Flow (Consent → Data Transfer)
+
+Triggered after Phase 2 linking is complete. The patient approves a consent request (via ABDM/HIU), ABDM notifies Kokoro, and Kokoro pushes the health records to the HIU.
+
+**How it works:**
+- Steps 14 and 16 are **inbound callbacks from ABDM** — you don't call them, ABDM does.
+- After each inbound callback, Kokoro **automatically** fires the outbound calls (steps 15, 17–19).
+- As a developer you only need to **monitor** the flow using `GET /abha/transactions`.
+
+**Data stored:** The full consent artefact from step 14 is persisted in the **ConsentArtefacts** DynamoDB table keyed by `consentId`. This is needed because step 16 only sends the `consentId` — without the stored artefact Kokoro wouldn't know which care context references to push.
+
+**Encryption note:** The FHIR bundle encryption (step 18) uses ECDH Curve25519 + AES-GCM with the HIU's public key from step 16. As of the Milestone 3 work the encryption module (`app/abdm/data_encryption.py`) is **fully implemented** (X25519 ECDH → HKDF-SHA256 → AES-256-GCM, SHA-256 checksum) and is shared with the HIU receive path. The remaining placeholder is `_build_fhir_bundle()` in `data_flow_service.py`, which still emits a structurally-empty bundle — the push now completes cryptographically but the clinical FHIR content is not yet assembled from Kokoro's records.
+
+---
+
+### 14. POST `/api/v3/consent/request/hip/notify` ← ABDM → Kokoro callback
+
+ABDM POSTs the full consent artefact here when a patient approves (or revokes) a consent request. **You do not call this — ABDM does.**
+
+**Triggered by:** Patient approving a consent request in the ABDM app/PHR app.
+
+**What ABDM sends:**
+```
+POST {bridge_url}/api/v3/consent/request/hip/notify
+X-HIP-ID: CITYHOSPITAL01
+REQUEST-ID: <new-uuid>
+TIMESTAMP: 2025-05-27T10:00:00.000Z
+
+{
+  "notification": {
+    "status": "GRANTED",
+    "consentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "consentDetail": {
+      "schemaVersion": "v3",
+      "consentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+      "createdAt": "2024-05-01T05:10:20.123Z",
+      "patient": { "id": "john.doe@abdm" },
+      "careContexts": [
+        {
+          "patientReference": "PAT-001",
+          "careContextReference": "CC-2025-001"
+        }
+      ],
+      "purpose": { "text": "Care Management", "code": "CAREMGT", "refUri": "www.abc.com" },
+      "hip": { "id": "CITYHOSPITAL01", "name": "City Hospital", "type": "HIP" },
+      "hiu": { "id": "HIU-001", "name": "Requesting App", "type": "HIU" },
+      "hiTypes": ["OPConsultation", "DiagnosticReport"],
+      "permission": {
+        "accessMode": "VIEW",
+        "dateRange": {
+          "from": "2024-01-01T00:00:00.000Z",
+          "to": "2025-01-01T00:00:00.000Z"
+        },
+        "dataEraseAt": "2026-01-01T00:00:00.000Z",
+        "frequency": { "unit": "HOUR", "value": 1, "repeats": 0 }
+      }
+    },
+    "signature": "e8nY601CYDs...",
+    "grantAcknowledgement": false
+  }
+}
+```
+
+**What Kokoro does automatically:**
+1. Persists the full consent artefact to **ConsentArtefacts** table (keyed by `consentId`)
+2. Fires the **step 15** acknowledgement to ABDM (6.3.2)
+3. Returns `{}` HTTP `202` to ABDM
+
+**Key values to note in the body:**
+| Field | Where used |
+|-------|-----------|
+| `notification.consentId` | Key for **ConsentArtefacts** and later data push |
+| `notification.consentDetail.careContexts[].careContextReference` | Used in step 18 to know which records to push |
+| `notification.status` | `GRANTED` starts the flow; `REVOKED` stops future pushes |
+| `REQUEST-ID` header | Echoed back in step 15 as `response.requestId` |
+
+---
+
+### 15. Automatic → POST `/api/hiecm/consent/v3/request/hip/on-notify` (Kokoro → ABDM, 6.3.2)
+
+Kokoro fires this automatically after step 14, acknowledging receipt of the consent notification. **Not callable from Postman.**
+
+**Body Kokoro sends to ABDM:**
+```json
+{
+  "acknowledgement": {
+    "status": "OK",
+    "consentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+  },
+  "response": {
+    "requestId": "<REQUEST-ID from the step 14 callback header>"
+  }
+}
+```
+
+**ABDM responds:** `202 Accepted`
+
+---
+
+### 16. POST `/api/v3/hip/health-information/request` ← ABDM → Kokoro callback
+
+ABDM forwards the HIU's data request here: the `consentId`, `dataPushUrl` (where to push the records), and the HIU's ECDH public key for encryption. **You do not call this — ABDM does.**
+
+**Triggered by:** HIU requesting the health data after consent is granted.
+
+**What ABDM sends:**
+```
+POST {bridge_url}/api/v3/hip/health-information/request
+X-HIP-ID: CITYHOSPITAL01
+REQUEST-ID: <transaction-uuid>
+TIMESTAMP: 2025-05-27T10:05:00.000Z
+
+{
+  "transactionId": "18235d89-cb13-479d-ad71-7a57d5f669a8",
+  "hiRequest": {
+    "consent": {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+    },
+    "dateRange": {
+      "from": "2024-01-01T00:00:00.000Z",
+      "to": "2025-01-01T00:00:00.000Z"
+    },
+    "dataPushUrl": "https://hiu-server.example.com/v3/data/push",
+    "keyMaterial": {
+      "cryptoAlg": "ECDH",
+      "curve": "Curve25519",
+      "dhPublicKey": {
+        "expiry": "2124-12-09T00:00:00.000Z",
+        "parameters": "Curve25519/32byte random key",
+        "keyValue": "BCpsBW37KgfLyjxJK0zHHG26hDjxzK368DEO4Pap..."
+      },
+      "nonce": "0ka0stPfqmXWhX+ODC/iOFMO0PXFdRjBdcEGbv55qqc="
+    }
+  }
+}
+```
+
+**What Kokoro does automatically (the full 6.3.3 → 6.3.6 orchestration):**
+1. Records a `PENDING` row in **AbdmTransactions** keyed by `transactionId`
+2. Fires **step 17** acknowledgement immediately
+3. Looks up the consent artefact from **ConsentArtefacts** (saved in step 14)
+4. Builds FHIR bundles per care context reference
+5. Encrypts them using the HIU's `keyMaterial` (ECDH + AES-GCM) → **step 18**
+6. Notifies the CM of transfer success/failure → **step 19**
+
+**Key values in the body:**
+| Field | Purpose |
+|-------|---------|
+| `transactionId` | Tracks the full data-push flow in **AbdmTransactions** |
+| `hiRequest.consent.id` | Looks up the stored consent artefact from step 14 |
+| `hiRequest.dataPushUrl` | Where Kokoro pushes encrypted records (step 18) |
+| `hiRequest.keyMaterial` | HIU's ECDH public key — used to encrypt records |
+
+**To monitor this flow:**
+```
+GET {{base_url}}/abha/transactions?request_id={{transaction_id}}
+```
+- `PENDING` = acknowledgement sent, waiting for push+notify to complete
+- `COMPLETED` = data pushed and CM notified
+- `FAILED` = push or notify failed (see `callback_payload.error`)
+
+---
+
+### 17. Automatic → POST `/api/hiecm/data-flow/v3/health-information/hip/on-request` (Kokoro → ABDM, 6.3.4)
+
+Kokoro fires this immediately after step 16, acknowledging the HI request. **Not callable from Postman.**
+
+**Body Kokoro sends to ABDM:**
+```json
+{
+  "hiRequest": {
+    "transactionId": "18235d89-cb13-479d-ad71-7a57d5f669a8",
+    "sessionStatus": "ACKNOWLEDGED"
+  },
+  "response": {
+    "requestId": "<REQUEST-ID from the step 16 callback header>"
+  }
+}
+```
+
+**ABDM responds:** `202 Accepted`
+
+---
+
+### 18. Automatic → POST `{dataPushUrl}` (Kokoro → HIU, 6.3.5)
+
+Kokoro pushes the encrypted FHIR records directly to the HIU's `dataPushUrl` from step 16. **Not callable from Postman — target URL is HIU-controlled.**
+
+**Encryption:** ECDH Curve25519 key exchange against the HIU's public key from step 16. Each FHIR bundle is AES-GCM encrypted. The HIP's own ephemeral public key + nonce (`keyMaterial`) is sent alongside so the HIU can derive the same shared secret and decrypt.
+
+> **Current status:** The encryption module (`app/abdm/data_encryption.py`) is now implemented (real X25519 ECDH + AES-256-GCM). The push therefore completes and the `AbdmTransactions` row reaches `COMPLETED`. **Caveat:** until `_build_fhir_bundle()` is replaced with real clinical-record assembly, the encrypted payload contains a placeholder (empty) FHIR bundle — wire it to Kokoro's clinical store before certification.
+
+**Body Kokoro sends to HIU:**
+```json
+{
+  "pageNumber": 1,
+  "pageCount": 1,
+  "transactionId": "18235d89-cb13-479d-ad71-7a57d5f669a8",
+  "entries": [
+    {
+      "content": "<base64 AES-GCM encrypted FHIR bundle>",
+      "media": "application/fhir+json",
+      "checksum": "<sha-256 of plaintext bundle>",
+      "careContextReference": "CC-2025-001"
+    }
+  ],
+  "keyMaterial": {
+    "cryptoAlg": "ECDH",
+    "curve": "Curve25519",
+    "dhPublicKey": {
+      "expiry": "2026-01-01T00:00:00.000Z",
+      "parameters": "Curve25519/32byte random key",
+      "keyValue": "<base64 HIP ephemeral public key>"
+    },
+    "nonce": "<base64 HIP nonce>"
+  }
+}
+```
+
+**HIU responds:** `202 Accepted`
+
+---
+
+### 19. Automatic → POST `/api/hiecm/data-flow/v3/health-information/notify` (Kokoro → ABDM, 6.3.6)
+
+Kokoro tells the CM whether the data transfer succeeded. Fired after step 18 completes. **Not callable from Postman.**
+
+**Body on success:**
+```json
+{
+  "notification": {
+    "consentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "transactionId": "18235d89-cb13-479d-ad71-7a57d5f669a8",
+    "doneAt": "2025-05-27T10:06:30.000Z",
+    "notifier": {
+      "type": "HIP",
+      "id": "CITYHOSPITAL01"
+    },
+    "statusNotification": {
+      "sessionStatus": "TRANSFERRED",
+      "hipId": "CITYHOSPITAL01",
+      "statusResponses": [
+        {
+          "careContextReference": "CC-2025-001",
+          "hiStatus": "OK",
+          "description": ""
+        }
+      ]
+    }
+  }
+}
+```
+
+**Body on failure:**
+```json
+{
+  "notification": {
+    "consentId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "transactionId": "18235d89-cb13-479d-ad71-7a57d5f669a8",
+    "doneAt": "2025-05-27T10:06:30.000Z",
+    "notifier": { "type": "HIP", "id": "CITYHOSPITAL01" },
+    "statusNotification": {
+      "sessionStatus": "FAILED",
+      "hipId": "CITYHOSPITAL01",
+      "statusResponses": [
+        {
+          "careContextReference": "CC-2025-001",
+          "hiStatus": "ERRORED",
+          "description": "<error message, truncated to 200 chars>"
+        }
+      ]
+    }
+  }
+}
+```
+
+**ABDM responds:** `202 Accepted`
+
+**After this call completes:**
+- `AbdmTransactions` row → `COMPLETED` (success) or `FAILED`
+- Poll with `GET {{base_url}}/abha/transactions?request_id={{transaction_id}}` to confirm
+
+---
+
+### Monitoring Phase 3
+
+Check status of a specific data flow transaction:
+```
+GET {{base_url}}/abha/transactions?request_id={{transaction_id}}
+```
+
+Check all pending data-flow requests for a hospital:
+```
+GET {{base_url}}/abha/transactions?hip_id=CITYHOSPITAL01&status=PENDING&limit=20
+```
+
+**`api` field values in AbdmTransactions for Phase 3:** `hi-data-flow`
+
+**Phase 3 transaction lifecycle:**
+```
+PENDING  → acknowledgement sent (step 17), push not yet done
+COMPLETED → pushed (step 18) + CM notified (step 19) successfully
+FAILED   → push or notify errored; check callback_payload.error
+```
+
+**Stuck at PENDING after encryption is implemented?** Check:
+1. `hiRequest.dataPushUrl` was reachable from Kokoro's network
+2. HIU's `keyMaterial.keyValue` is a valid Curve25519 base64 public key
+3. The consent artefact was persisted in step 14 (query `ConsentArtefacts` table directly)
+
+---
+
+## Phase 4 — HIU Flow (Milestone 3)
+
+Kokoro acts as **HIU** on a hospital's behalf: it asks a patient for consent, then pulls that patient's records from **another** HIP. Every call is asynchronous — Kokoro returns a `request_id` and ABDM POSTs results to the registered webhook (`/api/v3/hiu/...`).
+
+**Prerequisites:**
+- Phase 0 done (hospital registered via `register-facility`; bridge URL set). Registration now stores `hiu_id` (= `hip_id` in sandbox) so the hospital can act as HIU.
+- `KOKORO_WEBHOOK_BASE_URL` env var **must be set** to Kokoro's public base URL — it is used to build the `dataPushUrl` ABDM hands to the source HIP. Without it, `health-information/request` returns `400`.
+
+**State tables:** `HiuConsentRequests` (consent lifecycle, keyed by `request_id`, GSI on `consent_request_id`) and `HiuDataRequests` (data request + the ephemeral X25519 private key used to decrypt the inbound push, keyed by `request_id`, GSI on `transaction_id`). Fetched artefacts are stored in the shared `ConsentArtefacts` table.
+
+**How it works:** You call the four outbound endpoints below; ABDM drives the five inbound callbacks automatically (Kokoro stores state, acknowledges, decrypts, and notifies the CM). Monitor with the `GET` inspection endpoints.
+
+---
+
+### 20. POST `/abha/hiu/consent/request` — 4.3.1 raise a consent request
+
+**Auth required:** None
+
+- **Method:** POST · **URL:** `{{base_url}}/abha/hiu/consent/request`
+- **Body (raw JSON):**
+
+```json
+{
+  "hospital_id": "hosp-uuid-123",
+  "patient_abha_address": "john.doe@sbx",
+  "hi_types": ["OPConsultation", "DiagnosticReport"],
+  "date_from": "2024-01-01T00:00:00.000Z",
+  "date_to": "2025-01-01T00:00:00.000Z",
+  "data_erase_at": "2026-01-01T00:00:00.000Z",
+  "requester_name": "Dr. Manju",
+  "requester_id_value": "MH1001",
+  "hip_id": "OTHERHOSPITAL01"
+}
+```
+
+**Success (200):**
+
+```json
+{ "message": "Consent request accepted. consentRequestId will arrive via on-init.",
+  "request_id": "a1b2...", "hospital_id": "hosp-uuid-123" }
+```
+
+Optional fields default sensibly: `requester_id_type` (`REGNO`), `requester_id_system` (MCI), `purpose_code` (`CAREMGT`), `access_mode` (`VIEW`), `frequency_*`. `hip_id` and `care_contexts` are optional (omit to let the patient pick).
+
+**Save `request_id`** — use it in step 22 to read the assigned `consentRequestId`.
+
+---
+
+### 21. POST `/api/v3/hiu/consent/request/on-init` ← ABDM → Kokoro callback (4.3.2)
+
+ABDM returns the assigned `consentRequest.id`, correlated by `response.requestId` (the `request_id` from step 20). Kokoro stores it on the `HiuConsentRequests` row. **You don't call this.**
+
+---
+
+### 22. GET `/abha/hiu/consent/request/{request_id}` — inspect consent state
+
+Returns the row: `status` (`REQUESTED` → `GRANTED`/`DENIED`/`REVOKED`), `consent_request_id` (after step 21), `consent_ids` (after the patient approves, step 23).
+
+---
+
+### 23. POST `/api/v3/hiu/consent/request/notify` ← ABDM → Kokoro callback
+
+Patient approved / denied / revoked. ABDM sends `notification.consentRequestId`, `status`, and `consentArtefacts: [{ id }]`. Kokoro stores the granted `consentId`(s), then **automatically acknowledges** via 4.3.4 (`/api/hiecm/consent/v3/request/hiu/on-notify`), echoing the callback's REQUEST-ID. **You don't call this.**
+
+---
+
+### 24. POST `/abha/hiu/consent/status` — 4.3.5 poll status _(optional)_
+
+Body: `{ "hospital_id": "...", "consent_request_id": "..." }`. Result arrives at `/api/v3/hiu/consent/request/on-status` (4.3.6) and updates the row.
+
+---
+
+### 25. POST `/abha/hiu/consent/fetch` — 4.3.7 fetch the artefact
+
+Body: `{ "hospital_id": "...", "consent_id": "..." }`. The full artefact + signature arrive at `/api/v3/hiu/consent/on-fetch` (4.3.8) and are stored in `ConsentArtefacts` keyed by `consentId`.
+
+---
+
+### 26. POST `/abha/hiu/health-information/request` — request the records
+
+**Auth required:** None
+
+- **Body (raw JSON):**
+
+```json
+{
+  "hospital_id": "hosp-uuid-123",
+  "consent_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+  "date_from": "2024-01-01T00:00:00.000Z",
+  "date_to": "2025-01-01T00:00:00.000Z"
+}
+```
+
+**What Kokoro does:** generates an ephemeral X25519 key pair, persists the **private** key in `HiuDataRequests` keyed by `request_id`, sends ABDM our **public** key + the `dataPushUrl` (`{KOKORO_WEBHOOK_BASE_URL}/api/v3/hiu/health-information/transfer`). Returns `request_id`.
+
+---
+
+### 27. POST `/api/v3/hiu/health-information/transfer` ← HIP → Kokoro data push (6.3.5 inbound)
+
+The source HIP pushes encrypted FHIR `entries` + its own `keyMaterial` to our `dataPushUrl`. Kokoro **automatically**:
+1. Matches the push to our request by `transactionId` (falls back to the latest `PENDING`).
+2. Decrypts each entry with the stored private key (ECDH → AES-GCM), verifies the SHA-256 checksum.
+3. Persists the decrypted FHIR on the `HiuDataRequests` row (`status → RECEIVED`).
+4. Notifies the CM (6.3.6) with `notifier.type = HIU`, `sessionStatus = RECEIVED`.
+
+> **Production note:** decrypted bundles are currently stored on the data-request row for inspection — wire them into the patient's clinical record store. The ephemeral private key is persisted to enable async decryption; wrap it with KMS before production (WASA audit H-6).
+
+**You don't call this** — the HIP does.
+
+---
+
+### 28. GET `/abha/hiu/data/{request_id}` — inspect received data
+
+Returns the `HiuDataRequests` row with decrypted `received_bundles` once `status = RECEIVED`. The ephemeral private key and nonce are **redacted** from this response.
+
+---
+
+### HIU callback paths (all auto-routed to ABHALambda via `/api/v3/{proxy+}`)
+
+| Path | Spec | Purpose |
+|------|------|---------|
+| `/api/v3/hiu/consent/request/on-init` | 4.3.2 | consentRequestId assigned |
+| `/api/v3/hiu/consent/request/notify` | — | patient approved/denied/revoked (auto-acked 4.3.4) |
+| `/api/v3/hiu/consent/request/on-status` | 4.3.6 | status poll result |
+| `/api/v3/hiu/consent/on-fetch` | 4.3.8 | artefact delivery |
+| `/api/v3/hiu/health-information/transfer` | 6.3.5 | encrypted record push (decrypt + notify) |
+
+> **Security caveat (carried from the architecture review):** these HIU callbacks, like the M2 callbacks, do **not yet validate the ABDM gateway JWT**, and the data-push URL is the bridge URL set by an unauthenticated admin endpoint. Add callback JWT validation + consent-signature verification before production onboarding.
+
+---
+
+## Postman Setup Guide
+
+### Environment variables
+
+Go to **Postman → Environments → Edit** and add:
+
+| Variable       | Example Value               | Set when                         |
+| -------------- | --------------------------- | -------------------------------- |
+| `base_url`     | `http://localhost:8000`     | Always                           |
+| `aadhaar`      | `123456789012`              | Before Phase 1A                  |
+| `mobile`       | `9587733170`                | Before Phase 1A                  |
+| `abha_number`  | `12-3456-7890-1234`         | After step 5 (create or login)   |
+| `abha_address` | `john.doe@abdm`             | After step 6 (profile)           |
+| `hospital_id`  | `hosp-uuid-123`             | After step 2 (register-facility) |
+| `hip_id`       | `CITYHOSPITAL01`            | After step 2 (register-facility) |
+| `txn_id`          | _(auto-set by test script)_ | Auto from step 4                          |
+| `request_id`      | _(auto-set by test script)_ | Auto from steps 8 and 11                  |
+| `transaction_id`  | _(sent by ABDM)_            | From Phase 3 step 16 callback body        |
 
 **No auth headers needed anywhere.** All endpoints are open.
 
-Then reference in requests with `{{variable_name}}`.
+---
+
+### Auto-extract IDs with test scripts
+
+Add to the **Tests** tab of step 4 (request-otp):
+
+```javascript
+pm.environment.set("txn_id", pm.response.json().txn_id);
+```
+
+Add to the **Tests** tab of step 5 (verify-otp):
+
+```javascript
+pm.environment.set("abha_number", pm.response.json().abha_number);
+```
+
+Add to the **Tests** tab of steps 8 and 11 (generate-token / care-context):
+
+```javascript
+pm.environment.set("request_id", pm.response.json().request_id);
+```
 
 ---
 
-### Recommended test sequence
+### Decode ABHA card PDF
 
-**Setup Phase (run once per environment)**
+After step 7 in terminal:
 
-1. **Register bridge callback URL**
-   ```
-   PATCH {{base_url}}/abha/bridge/url
-   Body: {"url": "https://your-deployed-api.com"}
-   ```
-   - Tells ABDM where to send async callbacks
-
-2. **Register hospital facility** (no auth needed)
-   ```
-   POST {{base_url}}/abha/bridge/register-facility
-   Headers: Content-Type: application/json
-   Body: {
-     "hospital_id": "hosp-uuid-789",
-     "facility_id": "IN2810014366",
-     "facility_name": "City Hospital",
-     "bridge_id": "SBX_KOKORO",
-     "hip_name": "CITYHOSPITAL01",
-     "service_type": "HIP",
-     "active": true
-   }
-   ```
-   - **Save the `hospital_id` and `hip_id` to environment variables**
-
-3. **Verify hospitals**
-   ```
-   GET {{base_url}}/abha/bridge/hospitals
-   ```
-   - Confirm hospital is registered
-
-**User Flow Phase (Flow A — Create ABHA)**
-
-1. **Request OTP** (no auth needed)
-   ```
-   POST {{base_url}}/abha/create/request-otp
-   Headers: Content-Type: application/json
-   Body: {"aadhaar": "{{aadhaar}}"}
-   ```
-   - Response: `{txn_id: "...", message: "OTP sent..."}`
-   - Use Test script to auto-save: `pm.environment.set("txn_id", pm.response.json().txn_id);`
-
-2. **Verify OTP and create ABHA** (no auth)
-   ```
-   POST {{base_url}}/abha/create/verify-otp
-   Headers: Content-Type: application/json
-   Body: {
-     "txn_id": "{{txn_id}}",
-     "otp": "123456",
-     "mobile": "{{mobile}}"
-   }
-   ```
-   - Response includes ABHA number, profile, tokens
-   - **Save `abha_number` from the response** → set `{{abha_number}}` env variable
-
-3. **Fetch live profile**
-   ```
-   GET {{base_url}}/abha/profile?abha_number={{abha_number}}
-   ```
-   - No headers needed
-   - Shows current ABHA profile from ABDM
-
-4. **Download ABHA card as PDF**
-   ```
-   GET {{base_url}}/abha/card?abha_number={{abha_number}}
-   ```
-   - No headers needed
-   - Response: `{card_base64: "JVBERi..."}`
-   - Decode: `echo 'JVBERi...' | base64 -d > card.pdf` (Mac/Linux)
-
-**Linking Flow Phase (Flow D — HIP-initiated)**
-
-1. **Generate link token** (async)
-   ```
-   POST {{base_url}}/abha/link/generate-token
-   Headers: Content-Type: application/json
-   Body: {
-     "hospital_id": "{{hospital_id}}",
-     "abha_address": "{{abha_address}}",
-     "name": "John Doe",
-     "gender": "M",
-     "year_of_birth": 1990
-   }
-   ```
-   - Response: `{request_id: "...", message: "...accepted..."}`
-   - **Save request_id**: `pm.environment.set("request_id", pm.response.json().request_id);`
-   - ABDM processes async and POSTs to webhook
-
-2. **Poll for token completion** (wait 5-10 seconds first)
-   ```
-   GET {{base_url}}/abha/transactions?request_id={{request_id}}
-   ```
-   - Keep polling until `status` = `COMPLETED`
-   - Check `callback_payload.linkToken` when ready
-
-3. **Link care contexts** (uses stored link token)
-   ```
-   POST {{base_url}}/abha/link/care-context
-   Headers: Content-Type: application/json
-   Body: {
-     "hospital_id": "{{hospital_id}}",
-     "abha_address": "{{abha_address}}",
-     "abha_number": "{{abha_number}}",
-     "patient": [
-       {
-         "referenceNumber": "PAT-001",
-         "display": "John Doe",
-         "hiType": "OPConsultation",
-         "count": 1,
-         "careContexts": [
-           {
-             "referenceNumber": "CC-2025-001",
-             "display": "OPD Visit on 15 Jan 2025"
-           }
-         ]
-       }
-     ]
-   }
-   ```
-   - Response: `{request_id: "...", message: "...accepted..."}`
-   - Save request_id for tracking
-
-4. **Poll for linking completion** (wait 5-10 seconds)
-   ```
-   GET {{base_url}}/abha/transactions?request_id={{request_id}}
-   ```
-   - Poll until `status` = `COMPLETED` or `FAILED`
-   - On FAILED: check `callback_payload.error` for reason
-
-**Monitoring Phase**
-
-```
-GET {{base_url}}/abha/transactions?hip_id={{hip_id}}&status=PENDING&limit=10
-```
-- See pending requests for your hospital
-
-```
-GET {{base_url}}/abha/transactions?status=FAILED&limit=5
-```
-- See recent failures for debugging
-
----
-
-### Postman automation tips
-
-**Auto-extract IDs into environment variables**
-
-Add this to the **Tests** tab of `/create/request-otp`:
-```javascript
-var jsonData = pm.response.json();
-pm.environment.set("txn_id", jsonData.txn_id);
-pm.test("txn_id saved", () => pm.expect(jsonData.txn_id).to.be.a("string"));
-```
-
-**Add validation tests**
-
-In any response test:
-```javascript
-pm.test("Status is 200", () => pm.response.to.have.status(200));
-pm.test("Response has request_id", () => {
-    pm.expect(pm.response.json()).to.have.property("request_id");
-});
-pm.test("request_id is UUID", () => {
-    const uuid = pm.response.json().request_id;
-    pm.expect(uuid).to.match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
-});
-```
-
-**Decode Base64 card to file**
-
-In the response tab, use Pre-request Script:
-```javascript
-const response = pm.response.json();
-const base64 = response.card_base64;
-// Manually copy and paste into an online base64 decoder, save as .pdf
-console.log("Copy this base64 string to decode: " + base64.substring(0, 100) + "...");
-```
-
-Or use Node.js locally:
 ```bash
-# After copying card_base64 from Postman response:
 echo 'JVBERi0xLjQK...' | base64 -d > card.pdf
-open card.pdf  # on Mac
+open card.pdf  # Mac
 ```
 
 ---
 
-### Error handling in Postman
+### Common errors
 
-**401 Unauthorized**
-- Stored ABDM tokens for this `abha_number` have fully expired (access + refresh both expired)
-- Solution: Run create or login OTP flow again to get fresh tokens stored in DB
-
-**404 Not found**
-- Hospital not registered or ABHA not linked to user
-- Solution: Run setup phase first, confirm hospital_id is correct
-
-**409 Conflict**
-- No link token for patient at this hospital
-- Solution: Call `/link/generate-token` first, wait for COMPLETED status
-
-**500 Server Error**
-- Check backend logs
-- Verify ABDM service is reachable
-- Check that all required fields are present in request body
-
----
+| Status                           | Meaning                                 | Fix                                                                            |
+| -------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------ |
+| `400`                            | Missing or invalid field                | Check request body against docs above                                          |
+| `401`                            | Stored ABDM tokens expired              | Re-run OTP flow (steps 4–5) to refresh tokens                                  |
+| `404`                            | Record not found                        | Run setup steps first; confirm `abha_number` / `hospital_id` is correct        |
+| `409`                            | No link token for this patient+hospital | Run step 8 and wait for step 9 callback before calling step 11                 |
+| `403`                            | Hospital inactive                       | Set `active: true` via register-facility                                       |
+| `500`                            | ABDM or DB error                        | Check backend logs; verify ABDM sandbox is reachable                           |
+| `"Missing Authentication Token"` | API Gateway route not found             | Deploy latest `template.yaml` — PATCH/PUT/DELETE methods may not be registered |

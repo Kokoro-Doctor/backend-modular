@@ -70,9 +70,14 @@ def register_facility(
         "facilityId":   facility_id,
         "facilityName": facility_name,
         "bridgeId":     bridge_id,
-        "hipName":      hip_name,
-        "type":         service_type,
-        "active":       active,
+        "services": [
+            {
+                "id":     hip_name,
+                "name":   facility_name,
+                "type":   service_type,
+                "active": active,
+            }
+        ],
     }
     hip_client.post_facility(
         "/v4/int/v1/bridges/MutipleHRPAddUpdateServices",
@@ -81,7 +86,9 @@ def register_facility(
     )
     logger.info("[HIPLinkingService] Facility registered with ABDM, saving to DB")
 
-    # Persist so all subsequent HIP API calls can look up hip_id by hospital_id
+    # Persist so all subsequent HIP/HIU API calls can look up hip_id/hiu_id by hospital_id.
+    # In the ABDM sandbox a single serviceId acts as both HIP and HIU, so we register
+    # hiu_id == hip_id; override later if a hospital is given a distinct HIU service id.
     hospital_abdm_service.save(
         hospital_id=hospital_id,
         facility_id=facility_id,
@@ -89,6 +96,7 @@ def register_facility(
         bridge_id=bridge_id,
         hip_name=hip_name,
         hip_id=hip_name,       # ABDM uses hipName as the serviceId
+        hiu_id=hip_name,       # same serviceId doubles as the HIU id (M3)
         abdm_status="registered",
     )
     logger.info("[HIPLinkingService] hospital_id=%s saved to HospitalAbdmConfig", hospital_id)

@@ -100,6 +100,26 @@ def post_facility(path: str, payload: Any, hip_id: str) -> dict:
     return _handle_response(resp, path)
 
 
+def post_to_url(
+    url: str,
+    payload: Any,
+    hip_id: str,
+    request_id: Optional[str] = None,
+) -> dict:
+    """
+    POST to a fully-qualified absolute URL rather than the ABDM gateway base.
+
+    Used for the data push (6.3.5): ABDM forwards the HIU's `dataPushUrl` in the
+    6.3.3 request and the HIP pushes the encrypted bundle straight to that URL.
+    Carries the standard ABDM auth/transaction headers + X-HIP-ID.
+    """
+    headers = _gateway_headers(hip_id=hip_id, request_id=request_id)
+    logger.debug("[HIPClient] POST (data-push) %s hip_id=%s request_id=%s",
+                 url, hip_id, headers["REQUEST-ID"])
+    resp = requests.post(url, json=payload, headers=headers, timeout=30)
+    return _handle_response(resp, url)
+
+
 def _handle_response(resp: requests.Response, path: str) -> dict:
     if resp.ok:
         return resp.json() if resp.content else {}
