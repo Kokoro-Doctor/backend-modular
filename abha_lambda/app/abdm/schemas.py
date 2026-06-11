@@ -77,6 +77,40 @@ class LoginVerifyResponse(BaseModel):
         extra = "allow"
 
 
+class MobileLoginAccount(BaseModel):
+    """One ABHA account linked to a mobile number (7.4 Step 2 `accounts[]`)."""
+    ABHANumber: Optional[str] = None
+    preferredAbhaAddress: Optional[str] = None
+    name: Optional[str] = None
+    gender: Optional[str] = None
+    dob: Optional[str] = None
+    status: Optional[str] = None
+    profilePhoto: Optional[str] = None
+    kycVerified: Optional[bool] = None
+
+    class Config:
+        extra = "allow"
+
+
+class MobileLoginVerifyResponse(BaseModel):
+    """
+    7.4 Step 2 — verify mobile OTP.
+
+    Does NOT create a session. Returns a SHORT-LIVED (5 min) T-token plus the
+    list of ABHA accounts linked to the mobile. The caller picks one account
+    and calls verify/user (Step 3) with the T-token to get the real session.
+    """
+    txnId: str
+    token: Optional[str] = None           # short-lived T-token for verify/user
+    expiresIn: Optional[int] = None
+    authResult: Optional[str] = None
+    message: Optional[str] = None
+    accounts: List[MobileLoginAccount] = []
+
+    class Config:
+        extra = "allow"
+
+
 # ---------------------------------------------------------------------------
 # Milestone 2 — HIP Initiated Linking
 # ---------------------------------------------------------------------------

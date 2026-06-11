@@ -69,13 +69,12 @@ def register_facility(
     payload = {
         "facilityId":   facility_id,
         "facilityName": facility_name,
-        "bridgeId":     bridge_id,
-        "services": [
+        "HRP": [
             {
-                "id":     hip_name,
-                "name":   facility_name,
-                "type":   service_type,
-                "active": active,
+                "bridgeId": bridge_id,
+                "hipName":  hip_name,
+                "type":     service_type,
+                "active":   active,
             }
         ],
     }
@@ -100,6 +99,38 @@ def register_facility(
         abdm_status="registered",
     )
     logger.info("[HIPLinkingService] hospital_id=%s saved to HospitalAbdmConfig", hospital_id)
+
+
+# ---------------------------------------------------------------------------
+# 3.2.6  Find bridge by service ID (live ABDM query)
+# ---------------------------------------------------------------------------
+
+def find_bridge_by_service_id(service_id: str) -> dict:
+    """
+    Query ABDM for the bridge associated with the given service (HIP/HIU) ID.
+    Returns the raw ABDM response — no DB involved.
+    """
+    logger.info("[HIPLinkingService] Finding bridge for service_id=%s", service_id)
+    return hip_client.get_facility(
+        "/v4/int/v1/bridges/getByServicesId",
+        params={"serviceId": service_id},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3.2.7  Find services by bridge ID (live ABDM query)
+# ---------------------------------------------------------------------------
+
+def find_services_by_bridge_id(bridge_id: str) -> dict:
+    """
+    Query ABDM for all services (HIP/HIU) registered under the given bridge ID.
+    Returns the raw ABDM response — no DB involved.
+    """
+    logger.info("[HIPLinkingService] Finding services for bridge_id=%s", bridge_id)
+    return hip_client.get_facility(
+        "/v4/int/v1/bridges/getServices",
+        params={"bridgeId": bridge_id},
+    )
 
 
 # ---------------------------------------------------------------------------

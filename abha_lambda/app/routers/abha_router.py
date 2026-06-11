@@ -11,9 +11,14 @@ Flow A — Create new ABHA (Aadhaar-based):
   POST /abha/create/request-otp   → request OTP
   POST /abha/create/verify-otp    → verify OTP → save to DB
 
-Flow B — Login with existing ABHA:
+Flow B — Login with existing ABHA number (Aadhaar OTP):
   POST /abha/login/request-otp    → request OTP
   POST /abha/login/verify-otp     → verify OTP → save to DB
+
+Flow B2 — Login with mobile number (3-step; a mobile may map to many ABHAs):
+  POST /abha/login/mobile/request-otp  → request OTP to the mobile
+  POST /abha/login/mobile/verify-otp   → verify OTP → T-token + accounts list
+  POST /abha/login/mobile/verify-user  → pick one ABHA → save to DB
 
 Flow C — Profile & card (abha_number query param required):
   GET  /abha/profile?abha_number=XX-XXXX-XXXX-XXXX  → lookup by abha_number → live ABDM fetch
@@ -55,6 +60,21 @@ class LoginOTPRequest(BaseModel):
 class LoginVerifyOTPRequest(BaseModel):
     txn_id: str
     otp: str
+
+
+class MobileLoginOTPRequest(BaseModel):
+    mobile: str
+
+
+class MobileLoginVerifyOTPRequest(BaseModel):
+    txn_id: str
+    otp: str
+
+
+class MobileLoginVerifyUserRequest(BaseModel):
+    txn_id: str
+    abha_number: str
+    t_token: str
 
 
 # ---------------------------------------------------------------------------
@@ -159,6 +179,87 @@ def verify_login(body: LoginVerifyOTPRequest):
 
 
 # ---------------------------------------------------------------------------
+# Flow B2 — ABHA Login via Mobile Number (7.4) — 3-step flow
+#   A mobile can map to multiple ABHA accounts, so step 2 returns the account
+#   list + a short-lived T-token, and step 3 selects one account to get the
+#   final session token.
+# ---------------------------------------------------------------------------
+
+@router.post("/login/mobile/request-otp")
+def request_mobile_login_otp(body: MobileLoginOTPRequest):
+    """Step 1 — Encrypt mobile number and request a login OTP."""
+    try:
+        result = abha_service.request_mobile_login_otp(body.mobile)
+        return {"txn_id": result.txnId, "message": result.message}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[ABHA] request_mobile_login_otp failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/login/mobile/verify-otp")
+def verify_mobile_login_otp(body: MobileLoginVerifyOTPRequest):
+    """
+    Step 2 — Verify OTP. Returns a short-lived T-token plus the list of ABHA
+    accounts linked to the mobile. NO session is created yet — the caller must
+    pick one account and call /login/mobile/verify-user.
+    """
+    try:
+        result = abha_service.verify_mobile_login_otp(body.txn_id, body.otp)
+        return {
+            "message":    result.message or "OTP verified",
+            "txn_id":     result.txnId,
+            "t_token":    result.token,
+            "expires_in": result.expiresIn,
+            "accounts":   [a.model_dump(exclude_none=True) for a in result.accounts],
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[ABHA] verify_mobile_login_otp failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/login/mobile/verify-user")
+def verify_mobile_login_user(body: MobileLoginVerifyUserRequest):
+    """
+    Step 3 — Select one ABHA account (from step 2's list) and obtain the final
+    session token. Saves the full profile + tokens to AbhaAccounts table.
+    """
+    try:
+        data = abha_service.verify_mobile_login_user(body.txn_id, body.abha_number, body.t_token)
+
+        tokens_data  = data.get("tokens") or {}
+        profile_data = data.get("ABHAProfile") or {}
+
+        tokens = (
+            ABDMTokens(**tokens_data)
+            if all(tokens_data.get(k) for k in ("token", "expiresIn", "refreshToken", "refreshExpiresIn"))
+            else None
+        )
+        profile = ABHAProfile(**profile_data) if profile_data else None
+
+        if profile and tokens:
+            try:
+                abha_accounts_service.save(profile, tokens)
+            except Exception:
+                logger.exception("[ABHA] verify_mobile_login_user: DB save failed (non-fatal)")
+
+        return {
+            "message":      data.get("message", "Login verified"),
+            "abha_number":  profile.ABHANumber if profile else body.abha_number,
+            "abha_profile": profile.model_dump(exclude_none=True) if profile else profile_data,
+            "tokens":       tokens.model_dump() if tokens else tokens_data,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[ABHA] verify_mobile_login_user failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
 # Flow C — Profile & Card  (abha_number query param required, no auth)
 # ---------------------------------------------------------------------------
 
@@ -189,7 +290,7 @@ def get_profile(abha_number: str):
 @router.get("/card")
 def get_card(abha_number: str):
     """
-    Download the ABHA card as Base64 PDF.
+    Download the ABHA card as Base64 PNG.
     Requires abha_number as a query parameter.
     """
     try:

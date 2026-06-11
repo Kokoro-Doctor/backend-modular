@@ -14,6 +14,8 @@ ABDM (Ayushman Bharat Digital Mission) integration: ABHA creation/login, profile
 
 Run these once per environment (dev/staging/prod) before anything else.
 
+> **Verification tip:** After registering a facility (step 2), use the live ABDM lookup endpoints (steps 3 and 4) to confirm ABDM accepted the registration. Use step 5 to cross-check what Kokoro has stored in DynamoDB against what ABDM shows live.
+
 ---
 
 ### 1. PATCH `/abha/bridge/url`
@@ -84,7 +86,7 @@ Content-Type: application/json
   "hospital_id": "hosp-uuid-789",
   "facility_id": "IN2810014366",
   "facility_name": "City Hospital",
-  "bridge_id": "SBX_KOKORO",
+  "bridge_id": "SBXID_023051",
   "hip_name": "CITYHOSPITAL01",
   "service_type": "HIP",
   "active": true
@@ -103,32 +105,164 @@ Content-Type: application/json
 
 **Error responses:**
 
-- `400` — Invalid data or `hip_name` already exists
+- `422 HIS-1123` — Missing or invalid fields (wrong `facility_id` or `bridge_id`)
 - `500` — ABDM registration error
 
 **Field reference:**
 
-| Field           | Description                     | Example          | Notes                                            |
-| --------------- | ------------------------------- | ---------------- | ------------------------------------------------ |
-| `hospital_id`   | Kokoro's internal hospital UUID | `hosp-uuid-789`  | Must be unique within Kokoro                     |
-| `facility_id`   | HFR ID from ABDM                | `IN2810014366`   | ABDM-issued, from registration documents         |
-| `facility_name` | Hospital/clinic display name    | `City Hospital`  | Human-readable, for logging                      |
-| `bridge_id`     | Kokoro's ABDM bridge identifier | `SBX_KOKORO`     | Dev/staging: `SBX_KOKORO`, Prod: varies          |
-| `hip_name`      | ABDM service ID / X-HIP-ID      | `CITYHOSPITAL01` | ≤15 chars, alphanumeric, **unique per facility** |
-| `service_type`  | Service type                    | `HIP`            | Always `HIP`                                     |
-| `active`        | Enable/disable                  | `true`           | Set to `false` to deactivate                     |
+| Field           | Description                     | Example          | Notes                                                                             |
+| --------------- | ------------------------------- | ---------------- | --------------------------------------------------------------------------------- |
+| `hospital_id`   | Kokoro's internal hospital UUID | `hosp-uuid-789`  | Must be unique within Kokoro                                                      |
+| `facility_id`   | HFR ID from ABDM                | `IN2810014366`   | **Must be a real, HFR-registered facility ID** — test IDs will return `HIS-1123` |
+| `facility_name` | Hospital/clinic display name    | `City Hospital`  | Human-readable, for logging                                                       |
+| `bridge_id`     | Kokoro's ABDM bridge identifier | `SBXID_023051`   | **Must be your bridge ID** from the ABDM developer portal — others' IDs rejected  |
+| `hip_name`      | ABDM service ID / X-HIP-ID      | `CITYHOSPITAL01` | ≤15 chars, alphanumeric only, **unique per bridge per facility**                  |
+| `service_type`  | Service type                    | `HIP`            | Always `HIP`                                                                      |
+| `active`        | Enable/disable                  | `true`           | Set to `false` to deactivate                                                      |
+
+**What Kokoro sends to ABDM internally:**
+
+Kokoro transforms your request into the ABDM `MutipleHRPAddUpdateServices` format before forwarding:
+
+```json
+{
+  "facilityId": "IN2810014366",
+  "facilityName": "City Hospital",
+  "HRP": [
+    {
+      "bridgeId": "SBXID_023051",
+      "hipName": "CITYHOSPITAL01",
+      "type": "HIP",
+      "active": true
+    }
+  ]
+}
+```
 
 **Important notes:**
 
 - **Save `hospital_id`** — use it in all Phase 2 linking calls
-- `hip_name` becomes the `X-HIP-ID` header sent to ABDM on every HIP call
-- Must be ≤15 characters, alphanumeric only (no spaces or special chars)
+- `hip_name` becomes the `X-HIP-ID` header sent to ABDM on every subsequent HIP call
+- `facility_id` must exist in the **HFR sandbox** (`https://facility.abdm.gov.in`) — ABDM validates it in real-time
+- `bridge_id` must be the bridge assigned to your ABDM developer account
+- After registering, verify with step 3 (`find-bridge`) that ABDM reflects the correct data
 
 ---
 
-### 3. GET `/abha/bridge/hospitals`
+### 3. GET `/abha/bridge/find-bridge` — 3.2.6 Live ABDM lookup
 
-Verify all registered hospitals and their ABDM config.
+Query ABDM directly for the bridge associated with a given service (HIP/HIU) ID. Returns live data — **not from DB**.
+
+Use this after `register-facility` to confirm ABDM has the correct bridge mapping.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/bridge/find-bridge?service_id={{hip_name}}`
+- **Headers:** None required
+- **Body:** (none)
+
+**Example:**
+
+```
+GET {{base_url}}/abha/bridge/find-bridge?service_id=CITYHOSPITAL01
+```
+
+**Success response (200) — raw ABDM response:**
+
+```json
+{
+  "bridgeId": "SBXID_023051",
+  "bridgeName": "Kokoro Bridge",
+  "services": [
+    {
+      "id": "CITYHOSPITAL01",
+      "name": "City Hospital",
+      "type": "HIP",
+      "active": true
+    }
+  ]
+}
+```
+
+**Error responses:**
+
+- `404` — Service ID not found in ABDM
+- `502` — ABDM returned an unexpected error
+
+**Query parameter:**
+
+| Param        | Description                           | Example          |
+| ------------ | ------------------------------------- | ---------------- |
+| `service_id` | The ABDM service ID (= `hip_name` from step 2) | `CITYHOSPITAL01` |
+
+---
+
+### 4. GET `/abha/bridge/services` — 3.2.7 Live ABDM lookup
+
+Query ABDM directly for all services (HIP/HIU) registered under a bridge ID. Returns live data — **not from DB**.
+
+Use this to see everything registered under your bridge — useful to audit all registered hospitals.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** GET
+- **URL:** `{{base_url}}/abha/bridge/services?bridge_id={{bridge_id}}`
+- **Headers:** None required
+- **Body:** (none)
+
+**Example:**
+
+```
+GET {{base_url}}/abha/bridge/services?bridge_id=SBXID_023051
+```
+
+**Success response (200) — raw ABDM response:**
+
+```json
+{
+  "bridgeId": "SBXID_023051",
+  "services": [
+    {
+      "id": "CITYHOSPITAL01",
+      "name": "City Hospital",
+      "facilityId": "IN2810014366",
+      "type": "HIP",
+      "active": true
+    },
+    {
+      "id": "APOLLO01",
+      "name": "Apollo Clinic",
+      "facilityId": "IN3410000260",
+      "type": "HIP",
+      "active": true
+    }
+  ]
+}
+```
+
+**Error responses:**
+
+- `404` — Bridge ID not found in ABDM
+- `502` — ABDM returned an unexpected error
+
+**Query parameter:**
+
+| Param       | Description                                    | Example        |
+| ----------- | ---------------------------------------------- | -------------- |
+| `bridge_id` | Your ABDM bridge ID (= `bridge_id` from step 2) | `SBXID_023051` |
+
+---
+
+### 5. GET `/abha/bridge/hospitals` — Kokoro DB snapshot
+
+List all hospitals registered in Kokoro's DynamoDB. **Reads from DB — not a live ABDM call.**
+
+Use this to retrieve `hospital_id` values before calling Phase 2 endpoints, or to cross-check the DB state against the live ABDM data from steps 3 and 4.
 
 **Auth required:** None
 
@@ -148,7 +282,7 @@ Verify all registered hospitals and their ABDM config.
       "hospital_id": "hosp-uuid-123",
       "facility_id": "IN2810014366",
       "facility_name": "City Hospital",
-      "bridge_id": "SBX_KOKORO",
+      "bridge_id": "SBXID_023051",
       "hip_id": "CITYHOSPITAL01",
       "hip_name": "CITYHOSPITAL01",
       "abdm_status": "registered",
@@ -164,7 +298,7 @@ Verify all registered hospitals and their ABDM config.
 
 - `500` — Database error
 
-**Useful for:** Confirming `hospital_id` before calling Phase 2 endpoints, debugging `X-HIP-ID` issues.
+**Useful for:** Confirming `hospital_id` before calling Phase 2 endpoints, debugging `X-HIP-ID` issues. To verify what ABDM actually has, use steps 3 or 4 instead.
 
 ---
 
@@ -490,6 +624,162 @@ GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
 ```
 
 See [Option A step 7](#7-get-abhacard-optional) for full request/response details.
+
+---
+
+### Option C — Login with Mobile Number
+
+Login using only the registered **mobile number** — the user does not need to know their 14-digit ABHA number. Because a single mobile can be linked to **multiple** ABHA accounts, this is a **3-step** flow: step 2 returns the list of linked accounts plus a short-lived `t_token`, and step 3 selects one account to complete login.
+
+---
+
+#### 4a. POST `/abha/login/mobile/request-otp`
+
+Request OTP for a mobile number. OTP is sent to that mobile via the ABDM OTP system.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/login/mobile/request-otp`
+- **Headers:** None required
+- **Body (raw JSON):**
+
+```json
+{
+  "mobile": "9587733170"
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "txn_id": "ghi789-txn-id-from-abdm",
+  "message": "OTP sent to mobile number ending with ******3170"
+}
+```
+
+**Error responses:**
+
+- `400` — Invalid mobile number
+- `404` — No ABHA account linked to this mobile
+- `500` — ABDM service error
+
+**Important notes:**
+
+- **Save `txn_id`** — required in the next step
+
+---
+
+#### 5a. POST `/abha/login/mobile/verify-otp`
+
+Verify the OTP. Returns a **short-lived (5 min) `t_token`** and the list of ABHA accounts linked to the mobile. **No session is created yet** — pick one account and continue to step 6a.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/login/mobile/verify-otp`
+- **Headers:** None required
+- **Body (raw JSON):**
+
+```json
+{
+  "txn_id": "ghi789-txn-id-from-abdm",
+  "otp": "123456"
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "message": "OTP verified successfully",
+  "txn_id": "ghi789-txn-id-from-abdm",
+  "t_token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+  "expires_in": 300,
+  "accounts": [
+    {
+      "ABHANumber": "91-2568-7073-XXXX",
+      "preferredAbhaAddress": "johndoe@sbx",
+      "name": "John Doe",
+      "gender": "M",
+      "dob": "07-03-1997",
+      "status": "ACTIVE",
+      "kycVerified": true
+    }
+  ]
+}
+```
+
+**Error responses:**
+
+- `400` — Invalid OTP or txn_id not found
+- `500` — ABDM service error
+
+**Important notes:**
+
+- `t_token` is valid for **5 minutes** — complete step 6a before it expires
+- **Save `txn_id`, `t_token`, and the chosen `ABHANumber`** — all three are needed in the next step
+
+---
+
+#### 6a. POST `/abha/login/mobile/verify-user`
+
+Select one ABHA account from step 5a and obtain the final session token. Saves fresh profile + tokens to **AbhaAccounts**.
+
+**Auth required:** None (the short-lived `t_token` is passed in the body, not as an auth header)
+
+**Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/login/mobile/verify-user`
+- **Headers:** None required
+- **Body (raw JSON):**
+
+```json
+{
+  "txn_id": "ghi789-txn-id-from-abdm",
+  "abha_number": "91-2568-7073-XXXX",
+  "t_token": "eyJ0eXAiOiJKV1QiLCJhbGc..."
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "message": "Login verified",
+  "abha_number": "91-2568-7073-XXXX",
+  "abha_profile": {
+    "ABHANumber": "91-2568-7073-XXXX",
+    "firstName": "John",
+    "lastName": "Doe",
+    "mobile": "9587733170",
+    "gender": "M"
+  },
+  "tokens": {
+    "token": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+    "expiresIn": 1800,
+    "refreshToken": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+    "refreshExpiresIn": 1296000
+  }
+}
+```
+
+**Error responses:**
+
+- `400` — `abha_number` not in the step 5a list, or `t_token` expired/invalid
+- `500` — Database or ABDM service error
+
+**Important notes:**
+
+- `abha_number` must be one of the accounts returned in step 5a
+- **Save `abha_number` from the response** — needed for profile and card (Option A steps 6 & 7)
+- Token expiry: 30 min (access), 15 days (refresh)
 
 ---
 
@@ -1318,18 +1608,20 @@ Returns the `HiuDataRequests` row with decrypted `received_bundles` once `status
 
 Go to **Postman → Environments → Edit** and add:
 
-| Variable       | Example Value               | Set when                         |
-| -------------- | --------------------------- | -------------------------------- |
-| `base_url`     | `http://localhost:8000`     | Always                           |
-| `aadhaar`      | `123456789012`              | Before Phase 1A                  |
-| `mobile`       | `9587733170`                | Before Phase 1A                  |
-| `abha_number`  | `12-3456-7890-1234`         | After step 5 (create or login)   |
-| `abha_address` | `john.doe@abdm`             | After step 6 (profile)           |
-| `hospital_id`  | `hosp-uuid-123`             | After step 2 (register-facility) |
-| `hip_id`       | `CITYHOSPITAL01`            | After step 2 (register-facility) |
-| `txn_id`          | _(auto-set by test script)_ | Auto from step 4                          |
+| Variable          | Example Value               | Set when                                   |
+| ----------------- | --------------------------- | ------------------------------------------ |
+| `base_url`        | `http://localhost:8000`     | Always                                     |
+| `aadhaar`         | `123456789012`              | Before Phase 1A                            |
+| `mobile`          | `9587733170`                | Before Phase 1A                            |
+| `abha_number`     | `12-3456-7890-1234`         | After step 5 (create / login) or 6a (mobile login) |
+| `abha_address`    | `john.doe@abdm`             | After step 6 (profile)                     |
+| `hospital_id`     | `hosp-uuid-123`             | After step 2 (register-facility)           |
+| `hip_id`          | `CITYHOSPITAL01`            | After step 2 (register-facility)           |
+| `bridge_id`       | `SBXID_023051`              | Before step 2 (your ABDM bridge ID)        |
+| `txn_id`          | _(auto-set by test script)_ | Auto from step 4 / 4a                       |
+| `t_token`         | _(auto-set by test script)_ | Auto from step 5a (mobile login, 5 min TTL) |
 | `request_id`      | _(auto-set by test script)_ | Auto from steps 8 and 11                  |
-| `transaction_id`  | _(sent by ABDM)_            | From Phase 3 step 16 callback body        |
+| `transaction_id`  | _(sent by ABDM)_            | From Phase 3 step 16 callback body         |
 
 **No auth headers needed anywhere.** All endpoints are open.
 
@@ -1353,6 +1645,15 @@ Add to the **Tests** tab of steps 8 and 11 (generate-token / care-context):
 
 ```javascript
 pm.environment.set("request_id", pm.response.json().request_id);
+```
+
+**Mobile login (Option C):** add to the **Tests** tab of step 5a (mobile verify-otp) to capture the short-lived token and pick the first linked account:
+
+```javascript
+const r = pm.response.json();
+pm.environment.set("txn_id", r.txn_id);
+pm.environment.set("t_token", r.t_token);
+pm.environment.set("abha_number", r.accounts[0].ABHANumber); // or let the user choose
 ```
 
 ---

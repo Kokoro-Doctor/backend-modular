@@ -100,6 +100,21 @@ def post_facility(path: str, payload: Any, hip_id: str) -> dict:
     return _handle_response(resp, path)
 
 
+def get_facility(path: str, params: dict) -> dict:
+    """GET from the facility registry host (3.2.6, 3.2.7 — different base URL)."""
+    url = f"{config.ABDM_FACILITY_REG_BASE_URL}{path}"
+    headers = {
+        "Content-Type":  "application/json",
+        "REQUEST-ID":    str(uuid.uuid4()),
+        "TIMESTAMP":     _utc_timestamp(),
+        "Authorization": f"Bearer {token_manager.get_access_token()}",
+        "X-CM-ID":       config.ABDM_X_CM_ID,
+    }
+    logger.debug("[HIPClient] GET (facility) %s params=%s", url, params)
+    resp = requests.get(url, params=params, headers=headers, timeout=20)
+    return _handle_response(resp, path)
+
+
 def post_to_url(
     url: str,
     payload: Any,

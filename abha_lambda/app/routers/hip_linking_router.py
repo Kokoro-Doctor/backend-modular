@@ -13,7 +13,9 @@ Endpoints:
   POST  /abha/link/care-context        — 4.3.3: link care contexts using stored link token
   PATCH /abha/bridge/url               — 3.2.4: admin — register Kokoro webhook URL with ABDM
   POST  /abha/bridge/register-facility — 3.2.5: admin — register hospital facility + HRP bridge
-  GET   /abha/bridge/hospitals         — admin — list all registered hospitals
+  GET   /abha/bridge/find-bridge       — 3.2.6: live ABDM — find bridge by service ID
+  GET   /abha/bridge/services          — 3.2.7: live ABDM — find services by bridge ID
+  GET   /abha/bridge/hospitals         — admin — list all registered hospitals (from DB)
   GET   /abha/transactions             — admin — inspect ABDM async request/callback log
 """
 from typing import List, Optional
@@ -222,6 +224,46 @@ def register_facility(body: RegisterFacilityRequest):
         raise
     except Exception as e:
         logger.exception("[HIPLinking] register_facility failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 3.2.6 — Find bridge by service ID (live ABDM query)
+# ---------------------------------------------------------------------------
+
+@router.get("/bridge/find-bridge")
+def find_bridge_by_service_id(service_id: str):
+    """
+    Query ABDM live for the bridge registered against a given service (HIP/HIU) ID.
+    Returns the raw ABDM response — not from DB.
+    """
+    try:
+        result = hip_linking_service.find_bridge_by_service_id(service_id)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[HIPLinking] find_bridge_by_service_id failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# 3.2.7 — Find services by bridge ID (live ABDM query)
+# ---------------------------------------------------------------------------
+
+@router.get("/bridge/services")
+def find_services_by_bridge_id(bridge_id: str):
+    """
+    Query ABDM live for all services (HIP/HIU) registered under a given bridge ID.
+    Returns the raw ABDM response — not from DB.
+    """
+    try:
+        result = hip_linking_service.find_services_by_bridge_id(bridge_id)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[HIPLinking] find_services_by_bridge_id failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

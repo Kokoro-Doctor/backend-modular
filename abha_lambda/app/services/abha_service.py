@@ -15,6 +15,7 @@ from app.abdm.schemas import (
     EnrollmentOTPResponse,
     EnrollmentResponse,
     LoginOTPResponse,
+    MobileLoginVerifyResponse,
 )
 from app.logger import get_logger
 
@@ -102,6 +103,7 @@ def download_abha_card_bytes(user_token: str) -> bytes:
         "/abha/api/v3/profile/account/abha-card",
         user_token=user_token,
         raw=True,
+        accept="image/png",
     )
     return resp.content
 
@@ -169,6 +171,15 @@ def verify_abha_login(txn_id: str, otp: str) -> dict:
     }
 
     abha_profile = data.get("ABHAProfile") or data.get("abhaProfile")
+
+    # ABDM login/verify does not return ABHAProfile — fetch it separately using the token
+    if not abha_profile and tokens_normalized.get("token"):
+        try:
+            fetched = get_abha_profile(tokens_normalized["token"])
+            abha_profile = fetched.model_dump(exclude_none=True)
+        except Exception:
+            logger.warning("[ABHAService] Could not fetch profile after login verify", exc_info=True)
+
     logger.info(
         "[ABHAService] Login verified, ABHANumber=%s",
         abha_profile.get("ABHANumber") if abha_profile else "unknown",
@@ -182,7 +193,124 @@ def verify_abha_login(txn_id: str, otp: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 7. Refresh ABHA user token (called automatically — not a public endpoint)
+# 7. Login via Mobile OTP (7.4) — Step 1: request OTP to the mobile number
+# ---------------------------------------------------------------------------
+
+def request_mobile_login_otp(mobile: str) -> LoginOTPResponse:
+    """
+    Encrypt the mobile number and request a login OTP (7.4 Step 1).
+
+    Unlike ABHA-number login (which uses the Aadhaar OTP system), this targets
+    the mobile directly via the ABDM OTP system. Returns txnId and message.
+    """
+    logger.info("[ABHAService] Requesting mobile login OTP")
+    encrypted_mobile = encryption.encrypt_value(mobile)
+
+    payload = {
+        "scope": ["abha-login", "mobile-verify"],
+        "loginHint": "mobile",
+        "loginId": encrypted_mobile,
+        "otpSystem": "abdm",
+    }
+    data = abdm_client.post("/abha/api/v3/profile/login/request/otp", payload)
+    logger.info("[ABHAService] Mobile login OTP requested, txnId=%s", data.get("txnId"))
+    return LoginOTPResponse(**data)
+
+
+# ---------------------------------------------------------------------------
+# 8. Login via Mobile OTP (7.4) — Step 2: verify OTP -> T-token + accounts list
+# ---------------------------------------------------------------------------
+
+def verify_mobile_login_otp(txn_id: str, otp: str) -> MobileLoginVerifyResponse:
+    """
+    Encrypt the OTP and verify the mobile login OTP (7.4 Step 2).
+
+    Does NOT create a session. Returns a SHORT-LIVED (5 min) T-token plus the
+    list of ABHA accounts linked to the mobile (a mobile can map to several).
+    The caller must pick one account and call verify_mobile_login_user().
+    """
+    logger.info("[ABHAService] Verifying mobile login OTP, txnId=%s", txn_id)
+    encrypted_otp = encryption.encrypt_value(otp)
+
+    payload = {
+        "scope": ["abha-login", "mobile-verify"],
+        "authData": {
+            "authMethods": ["otp"],
+            "otp": {
+                "txnId": txn_id,
+                "otpValue": encrypted_otp,
+            },
+        },
+    }
+    data = abdm_client.post("/abha/api/v3/profile/login/verify", payload)
+    logger.info(
+        "[ABHAService] Mobile login OTP verified, txnId=%s accounts=%d",
+        data.get("txnId"),
+        len(data.get("accounts") or []),
+    )
+    return MobileLoginVerifyResponse(**data)
+
+
+# ---------------------------------------------------------------------------
+# 9. Login via Mobile OTP (7.4) — Step 3: select account -> final session token
+# ---------------------------------------------------------------------------
+
+def verify_mobile_login_user(txn_id: str, abha_number: str, t_token: str) -> dict:
+    """
+    Select one ABHA account and obtain the final session token (7.4 Step 3).
+
+    `t_token` is the short-lived token from verify_mobile_login_otp(); it is
+    sent in the `T-token` header (valid 5 minutes). Returns the same normalized
+    shape as verify_abha_login(): { "tokens": {...}, "ABHAProfile": {...} }.
+    """
+    logger.info(
+        "[ABHAService] Verifying mobile login user, txnId=%s ABHANumber=%s",
+        txn_id, abha_number,
+    )
+
+    payload = {
+        "ABHANumber": abha_number,
+        "txnId": txn_id,
+    }
+    data = abdm_client.post(
+        "/abha/api/v3/profile/login/verify/user",
+        payload,
+        extra_headers={"T-token": f"Bearer {t_token}"},
+    )
+
+    # verify/user returns token fields at the top level (like login/verify)
+    nested = data.get("tokens") or {}
+    tokens_normalized = {
+        "token":            data.get("token")            or nested.get("token"),
+        "expiresIn":        data.get("expiresIn")        or nested.get("expiresIn"),
+        "refreshToken":     data.get("refreshToken")     or nested.get("refreshToken"),
+        "refreshExpiresIn": data.get("refreshExpiresIn") or nested.get("refreshExpiresIn"),
+    }
+
+    abha_profile = data.get("ABHAProfile") or data.get("abhaProfile")
+
+    # verify/user does not return ABHAProfile — fetch it separately using the token
+    if not abha_profile and tokens_normalized.get("token"):
+        try:
+            fetched = get_abha_profile(tokens_normalized["token"])
+            abha_profile = fetched.model_dump(exclude_none=True)
+        except Exception:
+            logger.warning("[ABHAService] Could not fetch profile after mobile login verify/user", exc_info=True)
+
+    logger.info(
+        "[ABHAService] Mobile login complete, ABHANumber=%s",
+        abha_profile.get("ABHANumber") if abha_profile else abha_number,
+    )
+
+    return {
+        "tokens": tokens_normalized,
+        "ABHAProfile": abha_profile,
+        "message": data.get("message"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# 10. Refresh ABHA user token (called automatically — not a public endpoint)
 # ---------------------------------------------------------------------------
 
 def refresh_user_token(refresh_token: str) -> ABDMTokens:
