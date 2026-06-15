@@ -11,6 +11,10 @@ Flow A — Create new ABHA (Aadhaar-based):
   POST /abha/create/request-otp   → request OTP
   POST /abha/create/verify-otp    → verify OTP → save to DB
 
+Flow A2 — Verify a non-Aadhaar mobile (3.0 Step 4; needed for mobile login):
+  POST /abha/create/mobile/request-otp  → OTP to the mobile (same enrol txn_id)
+  POST /abha/create/mobile/verify-otp   → verify OTP → mobile linked to ABHA
+
 Flow B — Login with existing ABHA number (Aadhaar OTP):
   POST /abha/login/request-otp    → request OTP
   POST /abha/login/verify-otp     → verify OTP → save to DB
@@ -31,6 +35,7 @@ from pydantic import BaseModel
 
 from app.services import abha_service
 from app.services import abha_accounts_service
+from app.services import kokoro_user_service
 from app.abdm.schemas import ABHAProfile, ABDMTokens
 from app.logger import get_logger
 
@@ -51,6 +56,16 @@ class CreateVerifyOTPRequest(BaseModel):
     txn_id: str
     otp: str
     mobile: str
+
+
+class MobileVerifyOTPRequest(BaseModel):
+    txn_id: str
+    mobile: str
+
+
+class MobileVerifyConfirmRequest(BaseModel):
+    txn_id: str
+    otp: str
 
 
 class LoginOTPRequest(BaseModel):
@@ -75,6 +90,10 @@ class MobileLoginVerifyUserRequest(BaseModel):
     txn_id: str
     abha_number: str
     t_token: str
+
+
+class SignupFromAbhaRequest(BaseModel):
+    abha_number: str
 
 
 # ---------------------------------------------------------------------------
@@ -120,6 +139,48 @@ def create_abha(body: CreateVerifyOTPRequest):
         raise
     except Exception as e:
         logger.exception("[ABHA] create_abha failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Flow A2 — ABHA Mobile Verification (3.0 Step 4)
+#   Run AFTER /create/verify-otp when the chosen mobile differs from the
+#   Aadhaar-linked one (ABHAProfile.mobile comes back null). Links the mobile
+#   to the ABHA so it can later be used for mobile login. Uses the SAME txn_id
+#   returned by /create/verify-otp.
+# ---------------------------------------------------------------------------
+
+@router.post("/create/mobile/request-otp")
+def request_create_mobile_otp(body: MobileVerifyOTPRequest):
+    """Step 4a — Encrypt the mobile and request an OTP to verify it."""
+    try:
+        result = abha_service.request_mobile_verify_otp(body.txn_id, body.mobile)
+        return {"txn_id": result.txnId, "message": result.message}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[ABHA] request_create_mobile_otp failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/create/mobile/verify-otp")
+def verify_create_mobile_otp(body: MobileVerifyConfirmRequest):
+    """
+    Step 4b — Verify the mobile OTP. On success the mobile is linked to the
+    ABHA. Returns ABDM's { txn_id, auth_result, message }. To see the updated
+    mobile on the profile, call GET /abha/profile afterwards.
+    """
+    try:
+        data = abha_service.verify_mobile_verify_otp(body.txn_id, body.otp)
+        return {
+            "message":     data.get("message", "Mobile verified"),
+            "txn_id":      data.get("txnId"),
+            "auth_result": data.get("authResult"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[ABHA] verify_create_mobile_otp failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -256,6 +317,33 @@ def verify_mobile_login_user(body: MobileLoginVerifyUserRequest):
         raise
     except Exception as e:
         logger.exception("[ABHA] verify_mobile_login_user failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Flow D — Provision a Kokoro website user from an ABHA account
+#   Triggered AFTER ABHA creation (the AbhaAccounts row already exists). Creates
+#   a Kokoro Users-table profile (link-or-create — reuses an existing user with
+#   the same phone/email) and writes kokoro_user_id back onto the ABHA row.
+#
+#   NOTE: creates the Users profile ONLY — no AuthTable record — so the user
+#   cannot OTP-login until auth_lambda provisions their auth record. See
+#   kokoro_user_service for details.
+# ---------------------------------------------------------------------------
+
+@router.post("/signup-user")
+def signup_user_from_abha(body: SignupFromAbhaRequest):
+    """
+    Provision (or look up) a Kokoro user for an existing ABHA account and link
+    them. Returns { user_id, abha_number, created, already_linked }.
+    """
+    try:
+        result = kokoro_user_service.signup_user_from_abha(body.abha_number)
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[ABHA] signup_user_from_abha failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

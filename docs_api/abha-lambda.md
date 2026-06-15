@@ -408,6 +408,88 @@ Verify the OTP and create or retrieve the ABHA account. Saves profile + tokens t
 
 - `txn_id` must be from the previous step
 - **Save `abha_number` from the response** — needed for profile and card
+- **Keep `txn_id`** too — if the `mobile` you sent is **not** the Aadhaar-linked number, `abha_profile.mobile` comes back `null` (unverified). Run steps 5b–5c to link it, otherwise mobile login (Option C) will fail with `ABDM-1115`.
+
+---
+
+#### 5b. POST `/abha/create/mobile/request-otp` _(only if mobile ≠ Aadhaar mobile)_
+
+ABHA Mobile Verification (Milestone 1 §3.0 Step 4a). Sends an OTP to the mobile number so it can be linked to the freshly created ABHA. Uses the **same `txn_id`** from step 5.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/create/mobile/request-otp`
+- **Headers:** None required
+- **Body (raw JSON):**
+
+```json
+{
+  "txn_id": "abc123-txn-id-from-abdm",
+  "mobile": "9587733170"
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "txn_id": "abc123-txn-id-from-abdm",
+  "message": "OTP sent to mobile number ending with ******3372"
+}
+```
+
+**Error responses:**
+
+- `400` — Invalid mobile or txn_id not found / enrollment expired
+- `500` — ABDM service error
+
+**Important notes:**
+
+- `txn_id` is the **enrollment** txn_id from step 5 (do not start a new transaction)
+
+---
+
+#### 5c. POST `/abha/create/mobile/verify-otp` _(only if mobile ≠ Aadhaar mobile)_
+
+ABHA Mobile Verification (§3.0 Step 4b). Verifies the OTP and links the mobile to the ABHA. Note: this hits ABDM's `/enrollment/auth/byAbdm` endpoint and returns no tokens/profile.
+
+**Auth required:** None
+
+**Postman setup:**
+
+- **Method:** POST
+- **URL:** `{{base_url}}/abha/create/mobile/verify-otp`
+- **Headers:** None required
+- **Body (raw JSON):**
+
+```json
+{
+  "txn_id": "abc123-txn-id-from-abdm",
+  "otp": "123456"
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "message": "OTP verified successfully",
+  "txn_id": "366c8f41-4ef8-49ee-b73a-2e3e44613086",
+  "auth_result": "success"
+}
+```
+
+**Error responses:**
+
+- `400` — Invalid OTP or txn_id not found / OTP expired
+- `500` — ABDM service error
+
+**Important notes:**
+
+- After success, the mobile is linked — call **step 6** (`GET /abha/profile`) to see the populated `mobile`, and mobile login (Option C) will now work for this number
 
 ---
 

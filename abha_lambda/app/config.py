@@ -10,6 +10,15 @@ dynamodb = boto3.resource("dynamodb", region_name=AWS_REGION)
 ABHA_TABLE = os.environ.get("ABHA_TABLE", "AbhaAccounts")
 abha_table = dynamodb.Table(ABHA_TABLE)
 
+# Kokoro Users table — shared with auth_lambda / userService_lambda. Used to
+# provision a Kokoro user from an ABHA record (see kokoro_user_service) and by
+# user_abha_service. GSIs available: "phone-index" (phoneNumber), "email-index".
+USERS_TABLE = os.environ.get("USERS_TABLE", "Users")
+users_table = dynamodb.Table(USERS_TABLE)
+
+# Default country code for phone normalization (matches auth_lambda).
+SMS_COUNTRY_CODE = os.environ.get("SMS_COUNTRY_CODE", "+91")
+
 HOSPITAL_ABDM_TABLE = os.environ.get("HOSPITAL_ABDM_TABLE", "HospitalAbdmConfig")
 hospital_abdm_table = dynamodb.Table(HOSPITAL_ABDM_TABLE)
 

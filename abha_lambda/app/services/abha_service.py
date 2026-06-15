@@ -5,6 +5,7 @@ All methods call the ABDM APIs via abdm/client.py and return typed dicts
 or Pydantic models. Sensitive values (Aadhaar, OTP) are encrypted before
 being sent — they are NEVER logged.
 """
+from datetime import datetime, timezone
 from typing import Optional
 
 from app.abdm import client as abdm_client
@@ -79,6 +80,68 @@ def create_abha_by_aadhaar(txn_id: str, otp: str, mobile: str) -> EnrollmentResp
         data.get("ABHAProfile", {}).get("ABHANumber"),
     )
     return EnrollmentResponse(**data)
+
+
+# ---------------------------------------------------------------------------
+# 2b. ABHA Mobile Verification (3.0 Step 4) — link/verify a mobile that is NOT
+#     the Aadhaar-linked one. Runs AFTER create_abha_by_aadhaar, chained on the
+#     same enrollment txnId. Without this, the mobile is never linked to the
+#     ABHA record, so mobile login (7.4) returns ABDM-1115.
+#       Step 4a: send OTP to the mobile   →  request_mobile_verify_otp
+#       Step 4b: verify the OTP           →  verify_mobile_verify_otp
+# ---------------------------------------------------------------------------
+
+def request_mobile_verify_otp(txn_id: str, mobile: str) -> EnrollmentOTPResponse:
+    """
+    Encrypt the mobile number and request an OTP to verify it against the ABHA
+    being enrolled (3.0 Step 4a). Returns txnId and message.
+    """
+    logger.info("[ABHAService] Requesting mobile-verify OTP, txnId=%s", txn_id)
+    encrypted_mobile = encryption.encrypt_value(mobile)
+
+    payload = {
+        "txnId": txn_id,
+        "scope": ["abha-enrol", "mobile-verify"],
+        "loginHint": "mobile",
+        "loginId": encrypted_mobile,
+        "otpSystem": "abdm",
+    }
+    data = abdm_client.post("/abha/api/v3/enrollment/request/otp", payload)
+    logger.info("[ABHAService] Mobile-verify OTP requested, txnId=%s", data.get("txnId"))
+    return EnrollmentOTPResponse(**data)
+
+
+def verify_mobile_verify_otp(txn_id: str, otp: str) -> dict:
+    """
+    Encrypt the OTP and verify the mobile number (3.0 Step 4b).
+
+    NOTE: this uses the /enrollment/auth/byAbdm endpoint (not enrol/byAadhaar),
+    and ABDM returns only { txnId, authResult, message } — no tokens/profile.
+    Returns that dict verbatim.
+    """
+    logger.info("[ABHAService] Verifying mobile-verify OTP, txnId=%s", txn_id)
+    encrypted_otp = encryption.encrypt_value(otp)
+
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+    payload = {
+        "scope": ["abha-enrol", "mobile-verify"],
+        "authData": {
+            "authMethods": ["otp"],
+            "otp": {
+                "timeStamp": timestamp,
+                "txnId": txn_id,
+                "otpValue": encrypted_otp,
+            },
+        },
+    }
+    data = abdm_client.post("/abha/api/v3/enrollment/auth/byAbdm", payload)
+    logger.info(
+        "[ABHAService] Mobile-verify result=%s txnId=%s",
+        data.get("authResult"), data.get("txnId"),
+    )
+    return data
 
 
 # ---------------------------------------------------------------------------
