@@ -109,11 +109,12 @@ def _get_user_by_id(user_id: str) -> Optional[dict]:
 # Main entrypoint
 # ---------------------------------------------------------------------------
 
-def signup_user_from_abha(abha_number: str) -> dict:
+def signup_user_from_abha(abha_number: str, hospital_id: str) -> dict:
     """
     Provision (or look up) a Kokoro user for the given ABHA account and link
     them together. Identity (phone/email/name) is taken entirely from the
-    AbhaAccounts record.
+    AbhaAccounts record. hospital_id is stored on the Users record so the user
+    is linked to the originating hospital.
 
     Returns:
         {
@@ -178,10 +179,11 @@ def signup_user_from_abha(abha_number: str) -> dict:
         user_item = {
             "user_id": user_id,
             "createdAt": now_iso,
-            # Provenance + reverse link so the website knows this user came from ABHA
+            # Provenance + reverse links
             "source": "abha",
             "abha_linked": True,
             "abha_number": abha_number,
+            "hospital_id": hospital_id,
         }
         if normalized_phone:
             user_item["phoneNumber"] = normalized_phone

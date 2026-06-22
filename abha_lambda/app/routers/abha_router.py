@@ -94,6 +94,7 @@ class MobileLoginVerifyUserRequest(BaseModel):
 
 class SignupFromAbhaRequest(BaseModel):
     abha_number: str
+    hospital_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +339,7 @@ def signup_user_from_abha(body: SignupFromAbhaRequest):
     them. Returns { user_id, abha_number, created, already_linked }.
     """
     try:
-        result = kokoro_user_service.signup_user_from_abha(body.abha_number)
+        result = kokoro_user_service.signup_user_from_abha(body.abha_number, body.hospital_id)
         return result
     except HTTPException:
         raise
