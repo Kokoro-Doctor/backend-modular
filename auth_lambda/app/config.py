@@ -55,6 +55,13 @@ appointments_table = dynamodb.Table("AppointmentsTable")
 availability_table = dynamodb.Table("DoctorAvailabilityTable")
 chat_table = dynamodb.Table("ChatHistory")
 payments_table = dynamodb.Table("PaymentsTable")
+medilocker_documents_table = dynamodb.Table("MedilockerDocuments")
+user_doctor_subscriptions_table = dynamodb.Table("UserDoctorSubscriptions")
+user_doctor_relations_table = dynamodb.Table("UserDoctorRelations")
+doctor_earnings_table = dynamodb.Table("DoctorEarningsLedger")
+doctor_payouts_table = dynamodb.Table("DoctorPayoutsTable")
+abha_accounts_table = dynamodb.Table("AbhaAccounts")
+abdm_transactions_table = dynamodb.Table("AbdmTransactions")
 
 # S3 client for file deletion
 s3_client = boto3.client("s3", region_name=SMS_AWS_REGION)
