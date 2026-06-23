@@ -35,7 +35,6 @@ from pydantic import BaseModel
 
 from app.services import abha_service
 from app.services import abha_accounts_service
-from app.services import kokoro_user_service
 from app.abdm.schemas import ABHAProfile, ABDMTokens
 from app.logger import get_logger
 
@@ -90,11 +89,6 @@ class MobileLoginVerifyUserRequest(BaseModel):
     txn_id: str
     abha_number: str
     t_token: str
-
-
-class SignupFromAbhaRequest(BaseModel):
-    abha_number: str
-    hospital_id: str
 
 
 # ---------------------------------------------------------------------------
@@ -318,33 +312,6 @@ def verify_mobile_login_user(body: MobileLoginVerifyUserRequest):
         raise
     except Exception as e:
         logger.exception("[ABHA] verify_mobile_login_user failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------------------------------------------------------------------------
-# Flow D — Provision a Kokoro website user from an ABHA account
-#   Triggered AFTER ABHA creation (the AbhaAccounts row already exists). Creates
-#   a Kokoro Users-table profile (link-or-create — reuses an existing user with
-#   the same phone/email) and writes kokoro_user_id back onto the ABHA row.
-#
-#   NOTE: creates the Users profile ONLY — no AuthTable record — so the user
-#   cannot OTP-login until auth_lambda provisions their auth record. See
-#   kokoro_user_service for details.
-# ---------------------------------------------------------------------------
-
-@router.post("/signup-user")
-def signup_user_from_abha(body: SignupFromAbhaRequest):
-    """
-    Provision (or look up) a Kokoro user for an existing ABHA account and link
-    them. Returns { user_id, abha_number, created, already_linked }.
-    """
-    try:
-        result = kokoro_user_service.signup_user_from_abha(body.abha_number, body.hospital_id)
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.exception("[ABHA] signup_user_from_abha failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

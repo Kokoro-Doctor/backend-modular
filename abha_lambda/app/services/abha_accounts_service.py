@@ -105,19 +105,6 @@ def save(profile: ABHAProfile, tokens: ABDMTokens, kokoro_user_id: Optional[str]
     )
 
 
-def link_kokoro_user(abha_number: str, kokoro_user_id: str) -> None:
-    """
-    Attach a Kokoro user_id to an existing AbhaAccounts record (populates the
-    kokoro_user_id-index GSI). Called after provisioning a Kokoro user from an
-    ABHA record — see kokoro_user_service.signup_user_from_abha.
-    """
-    _run_update(abha_number, {"kokoro_user_id": kokoro_user_id})
-    logger.info(
-        "[AbhaAccountsService] Linked kokoro_user_id=%s to abha_number=%s",
-        kokoro_user_id, abha_number,
-    )
-
-
 def update_profile(abha_number: str, profile: ABHAProfile) -> None:
     """
     Refresh only profile fields (no token fields touched).
