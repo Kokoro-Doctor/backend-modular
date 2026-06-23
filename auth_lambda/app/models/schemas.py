@@ -38,6 +38,12 @@ class UserProfileCreate(BaseModel):
     name: Optional[str] = None
 
 
+class AbhaSignupRequest(BaseModel):
+    """Provision a loginable Kokoro user from an existing ABHA account."""
+    abha_number: str = Field(...)
+    hospital_id: str = Field(...)
+
+
 class DoctorProfileCreate(BaseModel):
     phoneNumber: str = Field(..., min_length=8)
     # email: EmailStr = Field(...)  # Now mandatory (same as user signup)
