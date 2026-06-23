@@ -142,16 +142,15 @@ def count_doctor_patients(doctor_id: str) -> dict:
 
 
 def list_hospital_patients_from_relations(hospital_id: str) -> dict:
-    relations = list_active_relations_for_hospital(hospital_id)
-    by_user: Dict[str, List[dict]] = {}
-    for relation in relations:
-        user_id = relation.get("user_id")
-        if user_id:
-            by_user.setdefault(user_id, []).append(relation)
-
-    patients = []
-    for user_id in by_user:
-        patients.append(_patient_summary(_get_user(user_id), user_id))
+    resp = USERS_TABLE.query(
+        IndexName="hospital_id-index",
+        KeyConditionExpression="hospital_id = :hid",
+        ExpressionAttributeValues={":hid": hospital_id},
+    )
+    patients = [
+        _patient_summary(user, user.get("user_id", ""))
+        for user in resp.get("Items", [])
+    ]
     return {"patients": patients}
 
 
