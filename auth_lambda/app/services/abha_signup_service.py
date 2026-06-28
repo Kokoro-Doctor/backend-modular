@@ -35,6 +35,7 @@ from app.services.user_service import (
     get_user_by_id,
 )
 from app.services.auth_service import ensure_auth_record, update_auth_record
+from app.services.membership_service import link_user_hospital
 
 logger = get_logger(__name__)
 
@@ -111,6 +112,8 @@ def signup_user_from_abha(abha_number: str, hospital_id: str) -> dict:
         phone = (user or {}).get("phoneNumber") or normalize_phone_number(record.get("mobile") or "")
         if phone:
             _mark_auth_account(phone, existing_user_id)
+        # Additive: link this user to the requesting hospital (may differ from a prior one).
+        link_user_hospital(existing_user_id, hospital_id, source="abha")
         token = create_jwt(phone_number=phone or "", role="user", user_id=existing_user_id)
         logger.info("[AbhaSignup] ABHA %s already linked to user_id=%s", abha_number, existing_user_id)
         return {
@@ -153,6 +156,10 @@ def signup_user_from_abha(abha_number: str, hospital_id: str) -> dict:
                 "abha_linked": True,
                 "abha_number": abha_number,
                 "hospital_id": hospital_id,
+                "gender": record.get("gender"),
+                "dob": record.get("dob"),
+                "address": record.get("address"),
+                "pin_code": record.get("pin_code"),
             },
         )
         user_id = user_item["user_id"]
@@ -161,6 +168,10 @@ def signup_user_from_abha(abha_number: str, hospital_id: str) -> dict:
 
     # (4) AuthTable record so the user can log in.
     _mark_auth_account(normalized_phone, user_id)
+
+    # (4b) Link the user to the requesting hospital (additive M:N; reused users
+    #      may already belong to other hospitals — those are left intact).
+    link_user_hospital(user_id, hospital_id, source="abha")
 
     # (5) Link back onto the ABHA row.
     _link_kokoro_user(abha_number, user_id)

@@ -7,6 +7,7 @@ from typing import List
 # Environment variables (required ones left as KeyError to fail fast in prod)
 USERS_TABLE = os.environ["USERS_TABLE"]
 DOCTORS_TABLE = os.environ["DOCTORS_TABLE"]
+USER_HOSPITAL_TABLE = os.environ.get("USER_HOSPITAL_TABLE", "UserHospital")
 AUTH_TABLE = os.environ["AUTH_TABLE"]
 AUTH_TOKENS_TABLE = os.environ["AUTH_TOKENS_TABLE"]
 SESSIONS_TABLE_NAME = os.environ["SESSIONS_TABLE"]
@@ -46,6 +47,7 @@ ADMIN_KEY = os.environ.get("ADMIN_KEY", "change-me-in-production")
 dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
 users_table = dynamodb.Table(USERS_TABLE)
 doctors_table = dynamodb.Table(DOCTORS_TABLE)
+user_hospital_table = dynamodb.Table(USER_HOSPITAL_TABLE)
 auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
 sessions_table = dynamodb.Table(SESSIONS_TABLE_NAME)

@@ -19,6 +19,7 @@ from app.services.staff_service import (
     get_doctor_for_hospital_staff_patient_flow,
     update_patient,
 )
+from app.services.membership_service import is_doctor_in_hospital
 from app.utils.error_utils import handle_exception
 from app.logger import get_logger
 
@@ -65,10 +66,10 @@ async def add_patient_endpoint(
 
         if data.doctor_id:
             doctor = get_doctor_for_hospital_staff_patient_flow(data.doctor_id)
-            if doctor.get("hospital_id") != data.hospital_id:
+            if not is_doctor_in_hospital(data.doctor_id, data.hospital_id):
                 logger.warning(
-                    f"[STAFF] Doctor {data.doctor_id!r} belongs to hospital "
-                    f"{doctor.get('hospital_id')!r}, not {data.hospital_id!r}"
+                    f"[STAFF] Doctor {data.doctor_id!r} is not affiliated with hospital "
+                    f"{data.hospital_id!r}"
                 )
                 raise HTTPException(status_code=403, detail="Doctor does not belong to your hospital")
             result = add_patient(
@@ -152,10 +153,10 @@ async def update_patient_endpoint(
         doctor = None
         if data.doctor_id:
             doctor = get_doctor_for_hospital_staff_patient_flow(data.doctor_id)
-            if doctor.get("hospital_id") != data.hospital_id:
+            if not is_doctor_in_hospital(data.doctor_id, data.hospital_id):
                 logger.warning(
-                    f"[STAFF] Doctor {data.doctor_id!r} belongs to hospital "
-                    f"{doctor.get('hospital_id')!r}, not {data.hospital_id!r}"
+                    f"[STAFF] Doctor {data.doctor_id!r} is not affiliated with hospital "
+                    f"{data.hospital_id!r}"
                 )
                 raise HTTPException(status_code=403, detail="Doctor does not belong to your hospital")
 
@@ -263,10 +264,9 @@ def import_patients_endpoint(
     try:
         doctor = get_doctor_for_hospital_staff_patient_flow(doctor_id)
 
-        if doctor.get("hospital_id") != hospital_id:
+        if not is_doctor_in_hospital(doctor_id, hospital_id):
             logger.warning(
-                f"[STAFF] Doctor {doctor_id!r} belongs to hospital "
-                f"{doctor.get('hospital_id')!r}, not {hospital_id!r}"
+                f"[STAFF] Doctor {doctor_id!r} is not affiliated with hospital {hospital_id!r}"
             )
             raise HTTPException(status_code=403, detail="Doctor does not belong to your hospital")
 

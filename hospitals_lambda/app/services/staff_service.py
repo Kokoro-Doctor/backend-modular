@@ -20,12 +20,18 @@ from app.config import (
     DOCTOR_AVAILABILITY_TABLE,
     SMS_COUNTRY_CODE,
 )
-from app.services.user_doctor_relation_service import (
+from app.services.user_doctor_service import (
     create_relation,
     deactivate_relation,
     get_active_hospital_assigned_doctor,
     RelationType,
     LinkedBy,
+)
+from app.services.membership_service import (
+    link_user_hospital,
+    link_doctor_hospital,
+    is_user_in_hospital,
+    is_doctor_in_hospital,
 )
 from app.logger import get_logger
 
@@ -150,8 +156,11 @@ def _get_doctor_by_phone(phone: str) -> Optional[dict]:
 
 def get_doctor_for_hospital_staff_patient_flow(doctor_id: str) -> dict:
     """
-    Load doctor by id for staff add-patient / import-patient flows.
-    404 if missing; 400 if doctor has no hospital affiliation.
+    Load doctor by id for staff add-patient / import-patient flows. 404 if missing.
+
+    Hospital affiliation is no longer a scalar on the doctor (a doctor may belong
+    to many hospitals via DoctorHospital), so the per-hospital check is done by
+    the caller with `is_doctor_in_hospital(doctor_id, hospital_id)`.
     """
     if not doctor_id or not str(doctor_id).strip():
         raise HTTPException(status_code=400, detail="doctor_id is required")
@@ -164,12 +173,6 @@ def get_doctor_for_hospital_staff_patient_flow(doctor_id: str) -> dict:
     doc = resp.get("Item")
     if not doc:
         raise HTTPException(status_code=404, detail="Doctor not found")
-    hid = doc.get("hospital_id")
-    if not hid:
-        raise HTTPException(
-            status_code=400,
-            detail="Doctor is not affiliated with a hospital; hospital staff cannot add patients for this doctor",
-        )
     return doc
 
 
@@ -308,7 +311,16 @@ def _create_default_slots(doctor_id: str) -> None:
 def _ensure_user_hospital_affiliation(
     user_id: str, hospital_id: str, hospital_name: str
 ) -> None:
-    """Set Users.hospital_id / hospital_name from the hospital staff session."""
+    """Affiliate a patient with a hospital — additive (M:N).
+
+    Source of truth is the UserHospital junction; this never removes the user's
+    other hospital memberships. The Users.hospital_id / hospital_name scalars are
+    also refreshed as a non-authoritative "most-recent hospital" pointer for any
+    legacy reader, but hospital membership queries read the junction.
+    """
+    link_user_hospital(
+        user_id, hospital_id, hospital_name=hospital_name, source="hospital_staff"
+    )
     try:
         USERS_TABLE.update_item(
             Key={"user_id": user_id},
@@ -318,15 +330,11 @@ def _ensure_user_hospital_affiliation(
                 ":hname": hospital_name,
             },
         )
-        logger.info(
-            f"[staff] set user hospital_affiliation user_id={user_id!r} "
-            f"hospital_id={hospital_id!r}"
-        )
     except Exception as e:
-        logger.error(
-            f"[staff] Users update_item hospital affiliation failed user_id={user_id!r} error={e!r}"
+        # Non-fatal: the junction (source of truth) is already written.
+        logger.warning(
+            f"[staff] Users most-recent-hospital pointer update failed user_id={user_id!r} error={e!r}"
         )
-        raise HTTPException(status_code=500, detail="Failed to set patient hospital affiliation")
 
 
 def add_patient(
@@ -347,8 +355,8 @@ def add_patient(
     the caller (JWT session), not from the doctor record. Also sets Users.hospital_id and
     hospital_name from the session hospital (new users on put_item; existing via update).
 
-    Without doctor_id: create/link a patient to the hospital only via Users.hospital_id /
-    hospital_name (from session). No UserDoctorRelations row.
+    Without doctor_id: create/link a patient to the hospital only via the
+    UserHospital junction (from session). No UserDoctor bond is created.
     """
     tail = _phone_tail(phone)
     normalized = normalize_phone_number(phone)
@@ -380,7 +388,7 @@ def add_patient(
     )
     if doc.get("doctor_id") != d_id:
         raise HTTPException(status_code=400, detail="doctor_id does not match preloaded_doctor")
-    if doc.get("hospital_id") != hospital_id:
+    if not is_doctor_in_hospital(d_id, hospital_id):
         raise HTTPException(
             status_code=403,
             detail="Doctor does not belong to the hospital in this request",
@@ -443,6 +451,7 @@ def add_patient(
         )
         raise HTTPException(status_code=500, detail="Failed to finalize patient account")
 
+    link_user_hospital(user_id, hospital_id, hospital_name=hospital_name, source="hospital_staff")
     _ensure_relation(user_id, d_id, hospital_id)
 
     return {"status": "created", "user": user_item}
@@ -506,7 +515,7 @@ def update_patient(
     if not resolved_user_id:
         raise HTTPException(status_code=500, detail="Patient record is missing user_id")
 
-    if patient.get("hospital_id") != hospital_id:
+    if not is_user_in_hospital(resolved_user_id, hospital_id):
         raise HTTPException(status_code=403, detail="Patient does not belong to your hospital")
 
     update_fields = _clean_patient_update_fields(updates or {})
@@ -559,7 +568,7 @@ def update_patient(
         )
         if doc.get("doctor_id") != d_id:
             raise HTTPException(status_code=400, detail="doctor_id does not match preloaded_doctor")
-        if doc.get("hospital_id") != hospital_id:
+        if not is_doctor_in_hospital(d_id, hospital_id):
             raise HTTPException(status_code=403, detail="Doctor does not belong to your hospital")
 
         current = get_active_hospital_assigned_doctor(resolved_user_id, hospital_id)
@@ -663,11 +672,13 @@ def _add_patient_hospital_only(
         )
         raise HTTPException(status_code=500, detail="Failed to finalize patient account")
 
+    link_user_hospital(user_id, hospital_id, hospital_name=hospital_name, source="hospital_staff")
+
     return {"status": "created", "user": user_item}
 
 
 def _ensure_relation(user_id: str, doctor_id: str, hospital_id: str) -> None:
-    """Best-effort: HOSPITAL_ASSIGNED relation; hospital_id from staff session (UserDoctorRelations)."""
+    """Best-effort: HOSPITAL_ASSIGNED bond; hospital_id from staff session (UserDoctor)."""
     try:
         create_relation(
             user_id=user_id,
@@ -751,11 +762,22 @@ def add_doctor(
             f"[staff] add_doctor auth record failed doctor_id={doctor_id!r} phone={tail} error={e!r}"
         )
         raise HTTPException(status_code=500, detail="Failed to finalize doctor account")
+    link_doctor_hospital(doctor_id, hospital_id, hospital_name=hospital_name, source="hospital_staff")
     _create_default_slots(doctor_id)
     return {"status": "created", "doctor": doctor_item}
 
 
 def _link_doctor_to_hospital(doctor_id: str, hospital_id: str, hospital_name: str) -> None:
+    """Affiliate a doctor with a hospital — additive (M:N).
+
+    Source of truth is the DoctorHospital junction; this never removes the
+    doctor's other hospital affiliations. The Doctors.hospital_id / hospital_name
+    scalars are also refreshed as a non-authoritative "most-recent hospital"
+    pointer for legacy/external readers.
+    """
+    link_doctor_hospital(
+        doctor_id, hospital_id, hospital_name=hospital_name, source="hospital_staff"
+    )
     try:
         DOCTORS_TABLE.update_item(
             Key={"doctor_id": doctor_id},
@@ -765,13 +787,10 @@ def _link_doctor_to_hospital(doctor_id: str, hospital_id: str, hospital_name: st
                 ":hname": hospital_name,
             },
         )
-        logger.info(
-            f"[staff] linked doctor doctor_id={doctor_id!r} to hospital_id={hospital_id!r} "
-            f"hospital_name={hospital_name!r}"
-        )
     except Exception as e:
-        logger.error(
-            f"[staff] link doctor failed doctor_id={doctor_id!r} hospital_id={hospital_id!r} error={e!r}"
+        # Non-fatal: the junction (source of truth) is already written.
+        logger.warning(
+            f"[staff] Doctors most-recent-hospital pointer update failed doctor_id={doctor_id!r} error={e!r}"
         )
 
 
