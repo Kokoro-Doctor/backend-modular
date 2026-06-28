@@ -867,79 +867,11 @@ Select one ABHA account from step 5a and obtain the final session token. Saves f
 
 ## Phase 1D — Provision Kokoro User from ABHA
 
-After the patient has created or logged into their ABHA (Phase 1 Options A–C), trigger this endpoint to provision (or look up) a Kokoro website user and link them together. This creates a Users-table record keyed by `user_id` and links it back to the AbhaAccounts row via `kokoro_user_id`.
+After the patient has created or logged into their ABHA (Phase 1 Options A–C), provision a **loginable** Kokoro user from the ABHA record.
 
-**Important caveat:** This creates **only** the Users profile — the user **cannot log in via OTP** until an AuthTable record is provisioned separately (not done by this endpoint). The provisioned user exists for data-linkage purposes (so health records can be attached to their account).
+> **This endpoint lives in auth_lambda, not abha_lambda.** It was moved there so it can create both the `Users` record and the `AuthTable` record (and issue a JWT) using the canonical auth path — meaning the user can log in immediately. See **`POST /auth/abha/signup-user`** in [auth-lambda.md](auth-lambda.md).
 
----
-
-### POST `/abha/signup-user` — Provision Kokoro user from ABHA
-
-Trigger this **once per ABHA account** you want to onboard to the Kokoro website. Idempotent — calling twice with the same `abha_number` returns the same `user_id`.
-
-**Auth required:** None
-
-**Postman setup:**
-
-- **Method:** POST
-- **URL:** `{{base_url}}/abha/signup-user`
-- **Headers:**
-
-```
-Content-Type: application/json
-```
-
-- **Body (raw JSON):**
-
-```json
-{
-  "abha_number": "12-3456-7890-1234"
-}
-```
-
-**Success response (200):**
-
-```json
-{
-  "user_id": "usr_a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "abha_number": "12-3456-7890-1234",
-  "created": true,
-  "already_linked": false
-}
-```
-
-**Error responses:**
-
-- `400` — ABHA record has no mobile or email to resolve identity
-- `404` — No AbhaAccounts row found for this `abha_number` (create the ABHA first)
-- `500` — Database error
-
-**Response fields:**
-
-| Field | Type | Meaning |
-|-------|------|---------|
-| `user_id` | string | Kokoro user ID — same format as auth_lambda generates (`usr_<uuid>`) |
-| `abha_number` | string | The ABHA number from the request (for confirmation) |
-| `created` | boolean | `true` = new Users record created; `false` = reused existing user |
-| `already_linked` | boolean | `true` = this ABHA was already linked to a user (idempotent return) |
-
-**Important notes:**
-
-- **Idempotent:** If the `abha_number` is already linked to a `user_id` (in AbhaAccounts.kokoro_user_id), returns that user immediately with `created: false, already_linked: true`.
-- **Link-or-create:** If no user is linked yet, the endpoint looks up any existing Kokoro user by phone (or email, if no phone) and reuses them. Only creates a new Users record if nobody matches.
-- **Phone source:** Uses the mobile from the ABHA record (stored when you called Flow A step 5 or Flow B step 5). If the mobile is still `null` (e.g., you created ABHA with an Aadhaar-linked mobile but never called Flow A step 5b/5c to verify a different mobile), this call returns `400`. **Workaround:** call Flow A step 5b/5c to link a mobile, then retry.
-- **No AuthTable created:** The provisioned user cannot log in via OTP yet. That requires an AuthTable record with `role=user`, `user_id`, `phone_verified=True`, `is_verified=True` — create that separately or have auth_lambda do it on first login.
-
-**Typical flow:**
-
-```
-1. Patient goes through ABHA creation/login (Phase 1A–C)
-   → ABHA record saved to AbhaAccounts
-2. Frontend/backend calls POST /abha/signup-user
-   → Kokoro user provisioned + linked
-3. (Future) When user tries to log in, auth_lambda creates AuthTable record
-   → User can now OTP-login
-```
+Quick summary: send `{ abha_number, hospital_id }` to `POST /auth/abha/signup-user`. It sources phone/name/email from the `AbhaAccounts` row, creates+links the user, writes `kokoro_user_id` back onto the ABHA row, and returns a JWT. Login afterward is `POST /auth/login` with the mobile (passwordless).
 
 ---
 

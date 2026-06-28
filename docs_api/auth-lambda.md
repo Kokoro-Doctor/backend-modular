@@ -138,6 +138,61 @@ Complete user signup. Supports two flows:
 
 ---
 
+### POST `/auth/abha/signup-user`
+
+Provision a **loginable** Kokoro user from an existing ABHA account and link them together. Trigger this **after** the patient has created/logged into their ABHA (abha_lambda Phase 1) — the `AbhaAccounts` row must already exist.
+
+Only `abha_number` and `hospital_id` are sent; identity (phone, name, email) is sourced from the stored ABHA record. The mobile on the ABHA record becomes the login credential — login is passwordless (`POST /auth/login` with the mobile, no OTP), so the user can sign in immediately.
+
+Creates a `Users` record **and** an `AuthTable` record (so the user can log in), writes a `UserHospital` membership row (patient ↔ hospital M:N), stores `abha_number` on the user, writes `kokoro_user_id` back onto the `AbhaAccounts` row, and returns a JWT.
+
+**Request body:**
+
+```json
+{
+  "abha_number": "12-3456-7890-1234",
+  "hospital_id": "hosp-uuid-123"
+}
+```
+
+**Success response (200):**
+
+```json
+{
+  "message": "User provisioned from ABHA successfully.",
+  "access_token": "eyJ...",
+  "user_id": "usr_a1b2c3d4-...",
+  "abha_number": "12-3456-7890-1234",
+  "hospital_id": "hosp-uuid-123",
+  "created": true,
+  "already_linked": false
+}
+```
+
+**Response fields:**
+
+| Field | Meaning |
+|-------|---------|
+| `access_token` | JWT for the provisioned user — they are logged in immediately |
+| `user_id` | Kokoro user ID (`usr_<uuid>`) |
+| `created` | `true` = new Users record written; `false` = reused existing user |
+| `already_linked` | `true` = this ABHA was already linked to a user (idempotent return, still returns a fresh JWT) |
+
+**Error responses:**
+
+- `400` — ABHA record has no verified mobile (run abha_lambda Flow A2 to link a mobile first)
+- `404` — No `AbhaAccounts` row for this `abha_number` (create the ABHA first)
+- `500` — Database error
+
+**Behaviour notes:**
+
+- **Idempotent:** if the ABHA is already linked to a `user_id`, returns that user with a fresh JWT (`already_linked: true`).
+- **Link-or-create:** if no user is linked yet but a Kokoro user already exists with the ABHA's mobile, that user is reused (no duplicate).
+- **Multi-hospital:** a `UserHospital` membership row is written in **all** branches (new user, reused user, already-linked). The user is additively linked to the requesting hospital without removing prior hospital memberships.
+- **Login afterward:** `POST /auth/login` with `{ "identifier": "<mobile>" }` (no OTP) returns a JWT — the mobile is the credential.
+
+---
+
 ### POST `/auth/doctor/signup`
 
 Complete doctor signup. Supports two flows:
