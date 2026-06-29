@@ -31,12 +31,7 @@ PRESCRIPTION_MAX_DOCS = int(os.getenv("PRESCRIPTION_MAX_DOCS", "10"))
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif", "bmp"}
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB (decoded size)
 
-# Hospital raw data ingestion (separate from Medilocker)
-HOSPITAL_DATA_PREFIX = "HospitalData/"
-HOSPITAL_UPLOADS_PREFIX = "hospital_uploads/"  # For presigned batch uploads
-HOSPITAL_FILES_TABLE = os.getenv("HOSPITAL_FILES_TABLE", "HospitalFiles")
 HOSPITAL_API_KEY = os.getenv("HOSPITAL_API_KEY")
-hospital_files_table = dynamodb.Table(HOSPITAL_FILES_TABLE)
 
 # ── Claim Validator config ──────────────────────────────────────────
 CLAIM_VALIDATOR_MODEL = os.getenv(

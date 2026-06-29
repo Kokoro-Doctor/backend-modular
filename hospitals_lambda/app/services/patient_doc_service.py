@@ -21,6 +21,7 @@ import unicodedata
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 from fastapi import HTTPException, UploadFile
 
@@ -52,9 +53,16 @@ PRESCRIPTION = "PRESCRIPTION"
 # Public entry point
 # ---------------------------------------------------------------------------
 
-async def upload_single_doc(user_id: str, doc_type: str, upload_file: UploadFile) -> dict:
-    """Upload a single document for a patient and enqueue OCR. Returns the doc record dict."""
-    return await _process_single_doc(user_id, doc_type, upload_file)
+async def upload_single_doc(
+    user_id: str, doc_type: str, upload_file: UploadFile, hospital_id: str
+) -> dict:
+    """Upload a single document for a patient and enqueue OCR. Returns the doc record dict.
+
+    hospital_id is the uploading hospital (from the JWT) — recorded on the doc
+    so the hospital can later see its own uploads without exposing them to
+    other hospitals.
+    """
+    return await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
 
 
 async def upload_patient_docs(
@@ -62,9 +70,12 @@ async def upload_patient_docs(
     insurance_policy: UploadFile,
     hospital_bill: UploadFile,
     prescription: UploadFile,
+    hospital_id: str,
 ) -> list[dict]:
     """
     Upload all 3 mandatory patient documents and enqueue OCR jobs.
+
+    hospital_id is the uploading hospital (from the JWT) — recorded on each doc.
 
     Returns a list of dicts (one per doc) with keys:
       doc_type, document_category (same uppercase value), file_id, s3_original_key
@@ -77,7 +88,7 @@ async def upload_patient_docs(
 
     results = []
     for doc_type, upload_file in uploads:
-        result = await _process_single_doc(user_id, doc_type, upload_file)
+        result = await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
         results.append(result)
 
     return results
@@ -91,6 +102,7 @@ async def _process_single_doc(
     user_id: str,
     doc_type: str,
     upload_file: UploadFile,
+    hospital_id: str,
 ) -> dict:
     filename = upload_file.filename or f"{doc_type}.bin"
     ext = _get_extension(filename)
@@ -159,6 +171,9 @@ async def _process_single_doc(
         "ocr_status": "PENDING",
         "structured_status": "SKIPPED",
         "upload_mode": "ASYNC",
+        # Uploaded by hospital staff on behalf of the patient.
+        "source": "HOSPITAL",
+        "hospital_id": hospital_id,
         "updated_at": now_iso,
     }
 
@@ -250,3 +265,71 @@ def _sanitize_filename(filename: str) -> str:
     normalized = unicodedata.normalize("NFKD", filename)
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
     return ascii_only.strip() or "unnamed"
+
+
+# ---------------------------------------------------------------------------
+# Read — hospital-scoped view of a patient's documents
+# ---------------------------------------------------------------------------
+
+def list_patient_docs_for_hospital(user_id: str, hospital_id: str) -> list[dict]:
+    """
+    Documents a hospital may see for one patient: the patient's own uploads
+    (source=USER) PLUS the docs *this* hospital uploaded — never another
+    hospital's docs.
+
+    Single user-partition query on MedilockerDocuments with a source/hospital_id
+    filter. Returns newest-first, each with a short-lived presigned download URL.
+    """
+    items: list[dict] = []
+    kwargs = {
+        "KeyConditionExpression": Key("user_id").eq(user_id),
+        "FilterExpression": Attr("source").eq("USER") | Attr("hospital_id").eq(hospital_id),
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            response = DOCUMENTS_TABLE.query(**kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except ClientError as exc:
+        logger.error(
+            f"[PATIENT_DOCS] Hospital view query failed user_id={user_id} "
+            f"hospital_id={hospital_id}: {exc}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to fetch patient documents")
+
+    docs = []
+    for doc in items:
+        s3_key = doc.get("s3_original_key")
+        download_url = None
+        if s3_key:
+            try:
+                download_url = s3_client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": S3_BUCKET, "Key": s3_key},
+                    ExpiresIn=3600,
+                )
+            except ClientError as exc:
+                logger.warning(
+                    f"[PATIENT_DOCS] Presign failed for {s3_key}: {exc}"
+                )
+        docs.append({
+            "file_id": doc.get("file_id"),
+            "filename": doc.get("filename"),
+            "doc_type": doc.get("doc_type"),
+            "document_category": doc.get("document_category"),
+            "source": doc.get("source", "USER"),
+            "hospital_id": doc.get("hospital_id"),
+            "ocr_status": doc.get("ocr_status"),
+            "created_at": doc.get("created_at"),
+            "download_url": download_url,
+        })
+
+    logger.info(
+        f"[PATIENT_DOCS] Hospital view returned {len(docs)} doc(s) "
+        f"user_id={user_id} hospital_id={hospital_id}"
+    )
+    return docs

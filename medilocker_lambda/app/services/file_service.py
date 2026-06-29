@@ -96,6 +96,7 @@ def upload_files(user_id: str, files):
             "s3_original_key": original_key,
             "s3_ocr_key": ocr_key,
             "ocr_status": "PENDING",
+            "source": "USER",
             "file_metadata": file_meta or None,
         })
         created_at = doc_record["created_at"]
@@ -187,6 +188,7 @@ def upload_files_async(user_id: str, files):
             "s3_ocr_key": ocr_key,
             "ocr_status": "PENDING",
             "upload_mode": "ASYNC",
+            "source": "USER",
             "file_metadata": file_meta or None,
         })
         created_at = doc_record["created_at"]
@@ -499,6 +501,7 @@ def save_prescription_to_medilocker(
         "ocr_status": "COMPLETED",
         "structured_status": "COMPLETED",
         "document_category": "PRESCRIPTION",
+        "source": "USER",
         "file_metadata": file_metadata,
     })
 

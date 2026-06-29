@@ -11,7 +11,14 @@ from fastapi.responses import JSONResponse
 from app.auth.jwt_auth import assert_hospital_id_matches_token, get_current_hospital
 from app.models.schemas import AddDoctorRequest, AddPatientForm, UpdatePatientForm
 from app.services.hospital_service import get_hospital_or_raise
-from app.services.patient_doc_service import upload_patient_docs, upload_single_doc, INSURANCE_POLICY, HOSPITAL_BILL, PRESCRIPTION
+from app.services.patient_doc_service import (
+    upload_patient_docs,
+    upload_single_doc,
+    list_patient_docs_for_hospital,
+    INSURANCE_POLICY,
+    HOSPITAL_BILL,
+    PRESCRIPTION,
+)
 from app.services.staff_excel_import_storage import stage_excel_import
 from app.services.staff_service import (
     add_patient,
@@ -109,6 +116,7 @@ async def add_patient_endpoint(
             insurance_policy=data.insurance_policy,
             hospital_bill=data.hospital_bill,
             prescription=data.prescription,
+            hospital_id=data.hospital_id,
         )
 
         logger.info(
@@ -176,7 +184,11 @@ async def update_patient_endpoint(
             (PRESCRIPTION, data.prescription),
         ]:
             if upload_file and getattr(upload_file, "filename", None):
-                doc_results.append(await upload_single_doc(data.user_id, doc_type, upload_file))
+                doc_results.append(
+                    await upload_single_doc(
+                        data.user_id, doc_type, upload_file, data.hospital_id
+                    )
+                )
 
         if doc_results:
             result["documents"] = doc_results
@@ -200,6 +212,33 @@ async def update_patient_endpoint(
             f"user_id={data.user_id!r}: {e}"
         )
         handle_exception(e, "Update patient")
+
+
+@router.get("/patients/{user_id}/documents")
+def list_patient_documents_endpoint(
+    user_id: str,
+    token_hospital_id: str = Depends(get_current_hospital),
+):
+    """List a patient's documents visible to the calling hospital.
+
+    Returns the patient's own uploads plus the documents *this* hospital
+    uploaded for the patient. Documents uploaded by other hospitals are never
+    returned. The hospital is taken from the JWT, not the request.
+    """
+    logger.info(
+        f"[STAFF] GET /patients/{user_id}/documents hospital_id={token_hospital_id!r}"
+    )
+    try:
+        documents = list_patient_docs_for_hospital(user_id, token_hospital_id)
+        return {"user_id": user_id, "count": len(documents), "documents": documents}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception(
+            f"[STAFF] GET /patients/{user_id}/documents failed "
+            f"hospital_id={token_hospital_id!r}: {e}"
+        )
+        handle_exception(e, "List patient documents")
 
 
 @router.post("/add-doctor", status_code=201)
