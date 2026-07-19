@@ -6,10 +6,6 @@ class FileUploadModel(BaseModel):
     content: str
     metadata: Optional[Dict[str, str]] = {}
 
-class UploadRequest(BaseModel):
-    user_id: str
-    files: List[FileUploadModel]
-
 class UserRequest(BaseModel):
     user_id: str
 
@@ -24,12 +20,6 @@ class ExtractionRequest(BaseModel):
 
 class ClinicalQueryRequest(BaseModel):
     question: str = ""
-
-
-class SavePrescriptionRequest(BaseModel):
-    """Request body for saving an approved prescription to Medilocker."""
-    prescription_pdf: str  # Base64-encoded PDF content
-
 
 
 class InsuranceAnalyzeFiles(BaseModel):

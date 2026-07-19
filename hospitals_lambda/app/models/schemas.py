@@ -44,10 +44,9 @@ class HospitalIdBody(BaseModel):
 # --- Staff management schemas ---
 
 class AddPatientRequest(BaseModel):
-    hospital_id: str
     doctor_id: Optional[str] = Field(
         None,
-        description="Attending doctor; if set, must belong to the hospital in the JWT (not the request body).",
+        description="Attending doctor; if set, must belong to the hospital in the JWT.",
     )
     phone: str
     name: str
@@ -78,7 +77,6 @@ class AddPatientForm:
         self,
         phone: str = Form(..., description="Patient phone (E.164 or local digits)"),
         name: str = Form(...),
-        hospital_id: str = Form(..., description="Must match JWT sub"),
         doctor_id: Optional[str] = Form(None, description="Attending doctor; must belong to hospital"),
         email: Optional[str] = Form(None),
         age: Optional[int] = Form(None, ge=0, le=150, description="Patient age in years"),
@@ -88,7 +86,6 @@ class AddPatientForm:
         hospital_bill: UploadFile = File(..., description="Hospital bill (PDF or image)"),
         prescription: UploadFile = File(..., description="Prescription (PDF or image)"),
     ):
-        self.hospital_id = (hospital_id or "").strip()
         self.phone = phone
         self.name = name
         self.doctor_id = (doctor_id or "").strip() or None

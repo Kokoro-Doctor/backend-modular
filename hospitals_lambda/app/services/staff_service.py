@@ -4,13 +4,12 @@ Staff service - handles adding patients and doctors on behalf of hospital staff.
 Creates user/doctor profiles, auth records, and hospital linkages.
 Follows the same patterns as auth_lambda's user_service and doctor_service.
 """
-import io
 import re
 import uuid
 from datetime import datetime, timezone, timedelta, time
 from typing import Any, Dict, Optional
 
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 from boto3.dynamodb.conditions import Key
 
 from app.config import (
@@ -22,7 +21,7 @@ from app.config import (
 )
 from app.services.user_doctor_service import (
     create_relation,
-    deactivate_relation,
+    remove_hospital_assignment,
     get_active_hospital_assigned_doctor,
     RelationType,
     LinkedBy,
@@ -124,7 +123,7 @@ def _get_user_by_phone(phone: str) -> Optional[dict]:
         return items[0] if items else None
     except Exception as e:
         logger.error(f"[staff] get_user_by_phone error: {e}")
-        return None
+        raise HTTPException(status_code=500, detail="Failed to look up patient") from e
 
 
 def _get_user_by_id(user_id: str) -> Optional[dict]:
@@ -155,8 +154,7 @@ def _get_doctor_by_phone(phone: str) -> Optional[dict]:
 
 
 def get_doctor_for_hospital_staff_patient_flow(doctor_id: str) -> dict:
-    """
-    Load doctor by id for staff add-patient / import-patient flows. 404 if missing.
+    """Load a doctor by id for the staff patient-update flow. 404 if missing.
 
     Hospital affiliation is no longer a scalar on the doctor (a doctor may belong
     to many hospitals via DoctorHospital), so the per-hospital check is done by
@@ -199,7 +197,7 @@ def _ensure_auth_record(
         existing = resp.get("Item")
     except Exception as e:
         logger.error(f"[staff] AuthTable get_item failed phone={tail} error={e!r}")
-        existing = None
+        raise HTTPException(status_code=500, detail="Failed to load authentication record") from e
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -235,7 +233,10 @@ def _ensure_auth_record(
                 )
             except Exception as e:
                 logger.error(f"[staff] AuthTable update_item failed phone={tail} error={e!r}")
-                raise
+                raise HTTPException(
+                    status_code=500,
+                    detail="Failed to update authentication record",
+                ) from e
         return existing
 
     record = {
@@ -262,7 +263,10 @@ def _ensure_auth_record(
         )
     except Exception as e:
         logger.error(f"[staff] AuthTable put_item failed phone={tail} role={role} error={e!r}")
-        raise
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create authentication record",
+        ) from e
     return record
 
 
@@ -308,33 +312,13 @@ def _create_default_slots(doctor_id: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _ensure_user_hospital_affiliation(
+def _ensure_user_hospital_membership(
     user_id: str, hospital_id: str, hospital_name: str
 ) -> None:
-    """Affiliate a patient with a hospital — additive (M:N).
-
-    Source of truth is the UserHospital junction; this never removes the user's
-    other hospital memberships. The Users.hospital_id / hospital_name scalars are
-    also refreshed as a non-authoritative "most-recent hospital" pointer for any
-    legacy reader, but hospital membership queries read the junction.
-    """
+    """Ensure the additive patient-hospital membership in UserHospital."""
     link_user_hospital(
         user_id, hospital_id, hospital_name=hospital_name, source="hospital_staff"
     )
-    try:
-        USERS_TABLE.update_item(
-            Key={"user_id": user_id},
-            UpdateExpression="SET hospital_id = :hid, hospital_name = :hname",
-            ExpressionAttributeValues={
-                ":hid": hospital_id,
-                ":hname": hospital_name,
-            },
-        )
-    except Exception as e:
-        # Non-fatal: the junction (source of truth) is already written.
-        logger.warning(
-            f"[staff] Users most-recent-hospital pointer update failed user_id={user_id!r} error={e!r}"
-        )
 
 
 def add_patient(
@@ -345,18 +329,15 @@ def add_patient(
     hospital_id: str,
     hospital_name: str = "",
     doctor_id: Optional[str] = None,
-    preloaded_doctor: Optional[dict] = None,
     age: Optional[int] = None,
     gender: Optional[str] = None,
     insurer: Optional[str] = None,
 ) -> dict:
-    """
-    With doctor_id: create/link a patient to that doctor. hospital_id on relations comes from
-    the caller (JWT session), not from the doctor record. Also sets Users.hospital_id and
-    hospital_name from the session hospital (new users on put_item; existing via update).
+    """Create or resolve a patient and ensure the requested relationships.
 
-    Without doctor_id: create/link a patient to the hospital only via the
-    UserHospital junction (from session). No UserDoctor bond is created.
+    UserHospital is always written using the hospital from the JWT session.
+    UserDoctor is also written when doctor_id is supplied. The Users row holds
+    patient attributes only and does not store hospital ownership fields.
     """
     tail = _phone_tail(phone)
     normalized = normalize_phone_number(phone)
@@ -367,50 +348,20 @@ def add_patient(
         )
         raise HTTPException(status_code=400, detail=f"Invalid phone number: {phone}")
 
-    if not doctor_id or not str(doctor_id).strip():
-        return _add_patient_hospital_only(
-            name,
-            email,
-            hospital_id=hospital_id,
-            hospital_name=hospital_name,
-            normalized_phone=normalized,
-            tail=tail,
-            age=age,
-            gender=gender,
-            insurer=insurer,
-        )
-
-    d_id = str(doctor_id).strip()
-    doc = (
-        preloaded_doctor
-        if preloaded_doctor is not None
-        else get_doctor_for_hospital_staff_patient_flow(d_id)
-    )
-    if doc.get("doctor_id") != d_id:
-        raise HTTPException(status_code=400, detail="doctor_id does not match preloaded_doctor")
-    if not is_doctor_in_hospital(d_id, hospital_id):
-        raise HTTPException(
-            status_code=403,
-            detail="Doctor does not belong to the hospital in this request",
-        )
-
-    logger.info(
-        f"[staff] add_patient start doctor_id={d_id!r} hospital_id={hospital_id!r} "
-        f"phone={tail} name={name!r}"
-    )
+    doctor_id = str(doctor_id).strip() if doctor_id else None
+    if doctor_id and not is_doctor_in_hospital(doctor_id, hospital_id):
+        raise HTTPException(status_code=403, detail="Doctor does not belong to this hospital")
 
     existing = _get_user_by_phone(normalized)
+
     if existing:
         user_id = existing["user_id"]
-        logger.info(
-            f"[staff] add_patient existing user doctor_id={d_id!r} phone={tail} "
-            f"user_id={user_id!r} ensuring relation and hospital on Users"
-        )
         _ensure_auth_record(normalized, "user", user_id=user_id, email=email)
-        _ensure_relation(user_id, d_id, hospital_id)
-        _ensure_user_hospital_affiliation(user_id, hospital_id, hospital_name)
-        merged = {**existing, "hospital_id": hospital_id, "hospital_name": hospital_name}
-        return {"status": "linked", "user": merged}
+        _ensure_user_hospital_membership(user_id, hospital_id, hospital_name)
+        if doctor_id:
+            _ensure_relation(user_id, doctor_id, hospital_id)
+
+        return {"status": "linked", "user": existing}
 
     user_id = generate_user_id()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -418,10 +369,8 @@ def add_patient(
         "user_id": user_id,
         "phoneNumber": normalized,
         "name": name.strip(),
-        "source": "hospital_import",
+        "source": "hospital_staff",
         "createdAt": now_iso,
-        "hospital_id": hospital_id,
-        "hospital_name": hospital_name,
     }
     if email:
         user_item["email"] = email.lower().strip()
@@ -435,27 +384,20 @@ def add_patient(
     try:
         USERS_TABLE.put_item(Item=user_item)
         logger.info(
-            f"[staff] add_patient created user_id={user_id!r} doctor_id={d_id!r} phone={tail}"
+            f"[staff] add_patient created user_id={user_id!r} doctor_id={doctor_id!r} phone={tail}"
         )
     except Exception as e:
         logger.error(
-            f"[staff] add_patient Users put_item failed doctor_id={d_id!r} phone={tail} error={e!r}"
+            f"[staff] add_patient Users put_item failed doctor_id={doctor_id!r} phone={tail} error={e!r}"
         )
         raise HTTPException(status_code=500, detail="Failed to create patient")
 
-    try:
-        _ensure_auth_record(normalized, "user", user_id=user_id, email=email)
-    except Exception as e:
-        logger.error(
-            f"[staff] add_patient auth record failed user_id={user_id!r} phone={tail} error={e!r}"
-        )
-        raise HTTPException(status_code=500, detail="Failed to finalize patient account")
-
-    link_user_hospital(user_id, hospital_id, hospital_name=hospital_name, source="hospital_staff")
-    _ensure_relation(user_id, d_id, hospital_id)
+    _ensure_auth_record(normalized, "user", user_id=user_id, email=email)
+    _ensure_user_hospital_membership(user_id, hospital_id, hospital_name)
+    if doctor_id:
+        _ensure_relation(user_id, doctor_id, hospital_id)
 
     return {"status": "created", "user": user_item}
-
 
 _PROTECTED_PATIENT_UPDATE_FIELDS = {
     "user_id",
@@ -494,7 +436,6 @@ def _clean_patient_update_fields(fields: Dict[str, Any]) -> Dict[str, Any]:
 def update_patient(
     *,
     hospital_id: str,
-    hospital_name: str = "",
     user_id: str,
     doctor_id: Optional[str] = None,
     preloaded_doctor: Optional[dict] = None,
@@ -524,8 +465,6 @@ def update_patient(
 
     now_iso = datetime.now(timezone.utc).isoformat()
     update_fields["updatedAt"] = now_iso
-    if hospital_name and not patient.get("hospital_name"):
-        update_fields["hospital_name"] = hospital_name
 
     expr_parts = []
     attr_names = {}
@@ -583,9 +522,9 @@ def update_patient(
         else:
             if current_doctor_id:
                 try:
-                    deactivate_relation(resolved_user_id, current_doctor_id)
+                    remove_hospital_assignment(resolved_user_id, current_doctor_id, hospital_id)
                     logger.info(
-                        f"[staff] update_patient deactivated old relation "
+                        f"[staff] update_patient removed old hospital assignment "
                         f"user_id={resolved_user_id!r} old_doctor_id={current_doctor_id!r}"
                     )
                 except Exception as e:
@@ -608,77 +547,8 @@ def update_patient(
     }
 
 
-def _add_patient_hospital_only(
-    name: str,
-    email: Optional[str],
-    *,
-    hospital_id: str,
-    hospital_name: str,
-    normalized_phone: str,
-    tail: str,
-    age: Optional[int] = None,
-    gender: Optional[str] = None,
-    insurer: Optional[str] = None,
-) -> dict:
-    """Patient under hospital only: Users.hospital_id / hospital_name; no user–doctor relation."""
-    logger.info(
-        f"[staff] add_patient hospital-only hospital_id={hospital_id!r} phone={tail} name={name!r}"
-    )
-
-    existing = _get_user_by_phone(normalized_phone)
-    if existing:
-        user_id = existing["user_id"]
-        _ensure_auth_record(normalized_phone, "user", user_id=user_id, email=email)
-        _ensure_user_hospital_affiliation(user_id, hospital_id, hospital_name)
-        merged = {**existing, "hospital_id": hospital_id, "hospital_name": hospital_name}
-        return {"status": "linked", "user": merged}
-
-    user_id = generate_user_id()
-    now_iso = datetime.now(timezone.utc).isoformat()
-    user_item = {
-        "user_id": user_id,
-        "phoneNumber": normalized_phone,
-        "name": name.strip(),
-        "source": "hospital_import",
-        "createdAt": now_iso,
-        "hospital_id": hospital_id,
-        "hospital_name": hospital_name,
-    }
-    if email:
-        user_item["email"] = email.lower().strip()
-    if age is not None:
-        user_item["age"] = age
-    if gender is not None and str(gender).strip():
-        user_item["gender"] = str(gender).strip()
-    if insurer is not None and str(insurer).strip():
-        user_item["insurer"] = str(insurer).strip()
-
-    try:
-        USERS_TABLE.put_item(Item=user_item)
-        logger.info(
-            f"[staff] add_patient hospital-only created user_id={user_id!r} phone={tail}"
-        )
-    except Exception as e:
-        logger.error(
-            f"[staff] add_patient hospital-only put_item failed phone={tail} error={e!r}"
-        )
-        raise HTTPException(status_code=500, detail="Failed to create patient")
-
-    try:
-        _ensure_auth_record(normalized_phone, "user", user_id=user_id, email=email)
-    except Exception as e:
-        logger.error(
-            f"[staff] add_patient hospital-only auth record failed user_id={user_id!r} error={e!r}"
-        )
-        raise HTTPException(status_code=500, detail="Failed to finalize patient account")
-
-    link_user_hospital(user_id, hospital_id, hospital_name=hospital_name, source="hospital_staff")
-
-    return {"status": "created", "user": user_item}
-
-
 def _ensure_relation(user_id: str, doctor_id: str, hospital_id: str) -> None:
-    """Best-effort: HOSPITAL_ASSIGNED bond; hospital_id from staff session (UserDoctor)."""
+    """Ensure the required HOSPITAL_ASSIGNED bond in UserDoctor."""
     try:
         create_relation(
             user_id=user_id,
@@ -687,11 +557,17 @@ def _ensure_relation(user_id: str, doctor_id: str, hospital_id: str) -> None:
             linked_by=LinkedBy.HOSPITAL_STAFF,
             hospital_id=hospital_id,
         )
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(
+        logger.exception(
             f"[staff] _ensure_relation failed user_id={user_id!r} doctor_id={doctor_id!r} "
             f"hospital_id={hospital_id!r} error={e!r}"
         )
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to link patient to doctor",
+        ) from e
 
 
 # ---------------------------------------------------------------------------
@@ -792,260 +668,3 @@ def _link_doctor_to_hospital(doctor_id: str, hospital_id: str, hospital_name: st
         logger.warning(
             f"[staff] Doctors most-recent-hospital pointer update failed doctor_id={doctor_id!r} error={e!r}"
         )
-
-
-# ---------------------------------------------------------------------------
-# Bulk: import patients from Excel (openpyxl only — avoids pandas/numpy in Lambda)
-# ---------------------------------------------------------------------------
-
-def _xlsx_to_records(content: bytes) -> tuple[list[str], list[dict]]:
-    """First row = headers (lowercased); following rows = dicts. .xlsx only."""
-    from openpyxl import load_workbook
-
-    size_kb = len(content) / 1024.0
-    logger.info(f"[staff] _xlsx_to_records parsing xlsx size_kb={size_kb:.2f}")
-    bio = io.BytesIO(content)
-    wb = load_workbook(bio, read_only=True, data_only=True)
-    try:
-        ws = wb.active
-        it = ws.iter_rows(values_only=True)
-        first = next(it, None)
-        if first is None:
-            logger.warning("[staff] _xlsx_to_records empty workbook (no header row)")
-            raise HTTPException(status_code=400, detail="Excel file is empty")
-        headers = []
-        for c in first:
-            headers.append(str(c).strip().lower() if c is not None else "")
-        records = []
-        for row in it:
-            rec = {}
-            for i, h in enumerate(headers):
-                if not h:
-                    continue
-                rec[h] = row[i] if i < len(row) else None
-            records.append(rec)
-        logger.info(
-            f"[staff] _xlsx_to_records parsed headers={headers!r} data_rows={len(records)}"
-        )
-        return headers, records
-    finally:
-        wb.close()
-
-
-def import_patients_from_excel(
-    preloaded_doctor: dict,
-    file: UploadFile,
-) -> dict:
-    fname = getattr(file, "filename", None) or ""
-    doctor_id = preloaded_doctor["doctor_id"]
-    hid = preloaded_doctor.get("hospital_id", "")
-    logger.info(
-        f"[staff] import_patients_from_excel start doctor_id={doctor_id!r} hospital_id={hid!r} filename={fname!r}"
-    )
-    if not file.filename or not file.filename.lower().endswith(".xlsx"):
-        logger.warning(f"[staff] import_patients wrong extension filename={fname!r}")
-        raise HTTPException(status_code=400, detail="File must be .xlsx")
-
-    try:
-        content = file.file.read()
-        if not content:
-            logger.warning("[staff] import_patients empty file body")
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[staff] import_patients read failed filename={fname!r} error={e!r}")
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
-
-    try:
-        headers, rows = _xlsx_to_records(content)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[staff] import_patients parse failed filename={fname!r} error={e!r}")
-        raise HTTPException(status_code=400, detail=f"Invalid Excel file: {e}")
-
-    if "phone" not in headers:
-        logger.warning(f"[staff] import_patients missing phone column headers={headers!r}")
-        raise HTTPException(status_code=400, detail="Excel must contain a 'phone' column")
-    if "name" not in headers:
-        logger.warning(f"[staff] import_patients missing name column headers={headers!r}")
-        raise HTTPException(status_code=400, detail="Excel must contain a 'name' column")
-
-    summary = {"total_rows": len(rows), "created": 0, "linked": 0, "skipped": 0, "errors": []}
-
-    for idx, row in enumerate(rows, start=2):
-        phone_raw = row.get("phone")
-        name_raw = row.get("name")
-        email_raw = row.get("email")
-
-        if _is_nan(phone_raw) or not str(phone_raw).strip():
-            summary["skipped"] += 1
-            continue
-        if _is_nan(name_raw) or not str(name_raw).strip():
-            summary["skipped"] += 1
-            continue
-
-        email = str(email_raw).strip() if not _is_nan(email_raw) else None
-
-        try:
-            result = add_patient(
-                str(phone_raw).strip(),
-                str(name_raw).strip(),
-                email,
-                hospital_id=hid,
-                hospital_name=preloaded_doctor.get("hospital_name") or "",
-                doctor_id=doctor_id,
-                preloaded_doctor=preloaded_doctor,
-            )
-            if result["status"] == "created":
-                summary["created"] += 1
-            else:
-                summary["linked"] += 1
-        except HTTPException as e:
-            summary["errors"].append({"row": idx, "detail": e.detail})
-            logger.warning(
-                f"[staff] import_patients row error doctor_id={doctor_id!r} row={idx} "
-                f"HTTP {e.status_code}: {e.detail}"
-            )
-        except Exception as e:
-            summary["errors"].append({"row": idx, "detail": str(e)})
-            logger.warning(
-                f"[staff] import_patients row error doctor_id={doctor_id!r} row={idx} error={e!r}"
-            )
-
-    err_n = len(summary["errors"])
-    if err_n:
-        logger.warning(
-            f"[staff] import_patients finished with row errors doctor_id={doctor_id!r} "
-            f"errors={err_n} sample={summary['errors'][:5]}"
-        )
-    logger.info(
-        f"[staff] import_patients summary doctor_id={doctor_id!r} "
-        f"total_rows={summary['total_rows']} created={summary['created']} "
-        f"linked={summary['linked']} skipped={summary['skipped']} errors={err_n}"
-    )
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# Bulk: import doctors from Excel
-# ---------------------------------------------------------------------------
-
-def import_doctors_from_excel(
-    hospital_id: str,
-    hospital_name: str,
-    file: UploadFile,
-) -> dict:
-    fname = getattr(file, "filename", None) or ""
-    logger.info(
-        f"[staff] import_doctors_from_excel start hospital_id={hospital_id!r} filename={fname!r}"
-    )
-    if not file.filename or not file.filename.lower().endswith(".xlsx"):
-        logger.warning(f"[staff] import_doctors wrong extension filename={fname!r}")
-        raise HTTPException(status_code=400, detail="File must be .xlsx")
-
-    try:
-        content = file.file.read()
-        if not content:
-            logger.warning("[staff] import_doctors empty file body")
-            raise HTTPException(status_code=400, detail="Uploaded file is empty")
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[staff] import_doctors read failed filename={fname!r} error={e!r}")
-        raise HTTPException(status_code=400, detail=f"Failed to read file: {e}")
-
-    try:
-        headers, rows = _xlsx_to_records(content)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"[staff] import_doctors parse failed filename={fname!r} error={e!r}")
-        raise HTTPException(status_code=400, detail=f"Invalid Excel file: {e}")
-
-    required = ["phone", "name", "specialization", "experience"]
-    missing = [c for c in required if c not in headers]
-    if missing:
-        logger.warning(f"[staff] import_doctors missing columns {missing} headers={headers!r}")
-        raise HTTPException(
-            status_code=400,
-            detail=f"Excel is missing required columns: {', '.join(missing)}",
-        )
-
-    summary = {"total_rows": len(rows), "created": 0, "linked": 0, "skipped": 0, "errors": []}
-
-    for idx, row in enumerate(rows, start=2):
-        phone_raw = row.get("phone")
-        name_raw = row.get("name")
-        spec_raw = row.get("specialization")
-        exp_raw = row.get("experience")
-        email_raw = row.get("email")
-
-        if _is_nan(phone_raw) or not str(phone_raw).strip():
-            summary["skipped"] += 1
-            continue
-        if _is_nan(name_raw) or not str(name_raw).strip():
-            summary["skipped"] += 1
-            continue
-        if _is_nan(spec_raw) or not str(spec_raw).strip():
-            summary["skipped"] += 1
-            continue
-        if _is_nan(exp_raw):
-            summary["skipped"] += 1
-            continue
-
-        email = str(email_raw).strip() if not _is_nan(email_raw) else None
-
-        try:
-            result = add_doctor(
-                hospital_id=hospital_id,
-                hospital_name=hospital_name,
-                phone=str(phone_raw).strip(),
-                name=str(name_raw).strip(),
-                specialization=str(spec_raw).strip(),
-                experience=str(exp_raw).strip(),
-                email=email,
-            )
-            if result["status"] == "created":
-                summary["created"] += 1
-            else:
-                summary["linked"] += 1
-        except HTTPException as e:
-            summary["errors"].append({"row": idx, "detail": e.detail})
-            logger.warning(
-                f"[staff] import_doctors row error hospital_id={hospital_id!r} row={idx} "
-                f"HTTP {e.status_code}: {e.detail}"
-            )
-        except Exception as e:
-            summary["errors"].append({"row": idx, "detail": str(e)})
-            logger.warning(
-                f"[staff] import_doctors row error hospital_id={hospital_id!r} row={idx} error={e!r}"
-            )
-
-    err_n = len(summary["errors"])
-    if err_n:
-        logger.warning(
-            f"[staff] import_doctors finished with row errors hospital_id={hospital_id!r} "
-            f"errors={err_n} sample={summary['errors'][:5]}"
-        )
-    logger.info(
-        f"[staff] import_doctors summary hospital_id={hospital_id!r} "
-        f"total_rows={summary['total_rows']} created={summary['created']} "
-        f"linked={summary['linked']} skipped={summary['skipped']} errors={err_n}"
-    )
-    return summary
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _is_nan(value) -> bool:
-    """Check if a value is NaN or None."""
-    if value is None:
-        return True
-    if isinstance(value, float):
-        import math
-        return math.isnan(value)
-    return False

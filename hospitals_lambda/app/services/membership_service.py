@@ -99,7 +99,7 @@ def _is_member(table, member_key: str, member_id: str, hospital_id: str) -> bool
             "[membership] is_member failed %s=%r hospital_id=%r: %r",
             member_key, member_id, hospital_id, e,
         )
-        return False
+        raise HTTPException(500, "Failed to verify hospital membership") from e
 
 
 # --------------------------- UserHospital ---------------------------

@@ -7,9 +7,9 @@ Architecture:
 """
 import time
 import json
-from typing import Optional
+from typing import List, Optional
 
-from fastapi import APIRouter, Body, File, HTTPException, Path, Query, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Path, Query, UploadFile
 from openai import OpenAI
 
 from app.services import file_service
@@ -19,7 +19,7 @@ from app.services import document_db_service
 from app.services import insurance_extraction_service
 from app.services import discharge_extraction_service
 from app.services.user_diagnosis_service import save_diagnosis_fields_for_user
-from app.models.schemas import UploadRequest, ExtractionRequest, ClinicalQueryRequest, SavePrescriptionRequest
+from app.models.schemas import ExtractionRequest, ClinicalQueryRequest
 from app.services.context_service import build_patient_context
 from app.services.clinical_query_service import answer_clinical_query
 from app.logger import get_logger
@@ -32,11 +32,46 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/medilocker", tags=["Medilocker"])
 
 
+async def _read_upload_payloads(
+    files: List[UploadFile], metadata_json: Optional[str]
+) -> list[dict]:
+    """Read multipart files into the dict shape file_service expects, attaching
+    per-file metadata parsed from a single JSON form field keyed by filename."""
+    metadata_map: dict = {}
+    if metadata_json:
+        try:
+            metadata_map = json.loads(metadata_json)
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="metadata must be valid JSON")
+        if not isinstance(metadata_map, dict):
+            raise HTTPException(status_code=400, detail="metadata must be a JSON object keyed by filename")
+
+    payloads = []
+    for f in files:
+        content = await f.read()
+        payloads.append({
+            "filename": f.filename,
+            "content": content,
+            "metadata": metadata_map.get(f.filename, {}),
+        })
+    return payloads
+
+
 @router.post("/upload")
-async def upload_file(body: UploadRequest):
+async def upload_file(
+    user_id: str = Form(...),
+    files: List[UploadFile] = File(...),
+    metadata: Optional[str] = Form(
+        None,
+        description='JSON object keyed by filename, e.g. {"a.pdf": {"file_type": "prescription"}}',
+    ),
+):
     try:
-        file_service.upload_files(body.user_id, body.files)
+        file_payloads = await _read_upload_payloads(files, metadata)
+        file_service.upload_files(user_id, file_payloads)
         return {"message": "Files uploaded successfully"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.exception("Upload failed")
         raise HTTPException(status_code=500, detail=str(e))
@@ -166,7 +201,8 @@ async def generate_prescription_from_s3_files(user_id: str = Path(..., descripti
 @router.post("/users/{user_id}/prescription/save")
 async def save_prescription(
     user_id: str = Path(..., description="Patient's user ID (Medilocker owner)"),
-    payload: SavePrescriptionRequest = Body(...),
+    file: UploadFile = File(..., description="Prescription PDF"),
+    filename: Optional[str] = Form(None, description="Optional display filename"),
 ):
     """
     Save an approved prescription to the patient's Medilocker.
@@ -176,9 +212,11 @@ async def save_prescription(
     is set to PRESCRIPTION.
     """
     try:
+        content_bytes = await file.read()
         result = file_service.save_prescription_to_medilocker(
             user_id=user_id,
-            prescription_pdf_base64=payload.prescription_pdf,
+            content_bytes=content_bytes,
+            filename=filename or file.filename,
         )
         return {
             "message": "Prescription saved to Medilocker successfully",
@@ -371,6 +409,83 @@ async def analyze_insurance_data(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/insurance/preauth/analyze")
+async def analyze_preauth_live_documents(
+    doctor_prescription: Optional[UploadFile] = File(
+        None,
+        description="Doctor prescription / treatment plan for pre-auth",
+    ),
+    insurance_policy: Optional[UploadFile] = File(
+        None,
+        description="Insurance policy card / policy document for pre-auth",
+    ),
+    hospital_bill: Optional[UploadFile] = File(
+        None,
+        description="Optional estimate, bill, or admission document",
+    ),
+):
+    """
+    Live-document pre-auth autofill.
+
+    This is the same pre-auth graph path used by stored-patient autofill, but
+    OCR is run from the uploaded documents instead of reading stored OCR text
+    from MedilockerDocuments.
+    """
+    start_time = time.time()
+
+    missing = []
+    if doctor_prescription is None:
+        missing.append("doctor_prescription")
+    if insurance_policy is None:
+        missing.append("insurance_policy")
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing required pre-auth document(s): {', '.join(missing)}",
+        )
+
+    try:
+        documents = {
+            "doctor_prescription": await doctor_prescription.read(),
+            "insurance_policy": await insurance_policy.read(),
+        }
+        filenames = {
+            "doctor_prescription": doctor_prescription.filename or "prescription.pdf",
+            "insurance_policy": insurance_policy.filename or "insurance_policy.pdf",
+        }
+
+        if hospital_bill is not None:
+            documents["hospital_bill"] = await hospital_bill.read()
+            filenames["hospital_bill"] = hospital_bill.filename or "hospital_bill.pdf"
+
+        total_size = sum(len(b) for b in documents.values())
+        logger.info(
+            f"[PREAUTH_LIVE] Request: {len(documents)} file(s), "
+            f"{total_size} bytes, types: {list(documents.keys())}"
+        )
+
+        from app.services.claim_validator_graph import validate_claim
+
+        result = validate_claim(documents=documents, filenames=filenames)
+        result["flow"] = "preauth_live"
+        result["preauth_mode"] = "live_upload"
+
+        elapsed_time = time.time() - start_time
+        logger.info(f"[PREAUTH_LIVE] Completed in {elapsed_time:.2f}s")
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        elapsed_time = time.time() - start_time
+        logger.error(
+            f"[PREAUTH_LIVE] Unexpected error after {elapsed_time:.2f}s: "
+            f"{type(e).__name__}: {str(e)}"
+        )
+        logger.exception("Full exception traceback:")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/insurance/analyze/stream")
 async def analyze_insurance_data_stream(
     file: UploadFile = File(..., description="Insurance document (image or PDF)"),
@@ -483,7 +598,14 @@ async def extract_structured_data(body: ExtractionRequest):
 # ---------------------------------------------------------------------------
 
 @router.post("/upload/async", status_code=202)
-async def upload_file_async(body: UploadRequest):
+async def upload_file_async(
+    user_id: str = Form(...),
+    files: List[UploadFile] = File(...),
+    metadata: Optional[str] = Form(
+        None,
+        description='JSON object keyed by filename, e.g. {"a.pdf": {"file_type": "prescription"}}',
+    ),
+):
     """
     Async file upload — accepts images and PDFs.
 
@@ -495,7 +617,8 @@ async def upload_file_async(body: UploadRequest):
     track when OCR and structured extraction complete.
     """
     try:
-        results = file_service.upload_files_async(body.user_id, body.files)
+        file_payloads = await _read_upload_payloads(files, metadata)
+        results = file_service.upload_files_async(user_id, file_payloads)
         return {
             "message": "Files accepted for background processing",
             "files": results,

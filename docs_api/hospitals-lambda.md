@@ -2,7 +2,7 @@
 
 Two routers are registered:
 - **`/hospitals`** — CRUD, auth, relation management, and read-only views
-- **`/hospitals/staff`** — hospital-staff operations (add/update patients & doctors, bulk Excel import); every request requires `Authorization: Bearer <hospital-token>` from `POST /hospitals/login` and the `hospital_id` in the body/form must match the JWT `sub`
+- **`/hospitals/staff`** — hospital-staff operations (add/update patients & doctors); every request requires `Authorization: Bearer <hospital-token>` from `POST /hospitals/login`. `POST /add-patient` derives the hospital from the JWT; endpoints that still accept `hospital_id` require it to match the JWT `sub`.
 
 CORS is allowed from `https://kokoro.doctor` and `http://localhost:8081`.
 
@@ -410,7 +410,7 @@ Get the unique active patient count for a doctor. No auth required.
 
 ## Staff Endpoints
 
-All staff endpoints require `Authorization: Bearer <token>` from `POST /hospitals/login`. The `hospital_id` in every request must match the JWT `sub`. Disabled hospitals return `403`.
+All staff endpoints require `Authorization: Bearer <token>` from `POST /hospitals/login`. `POST /add-patient` takes the hospital identity only from the JWT. On endpoints that still include `hospital_id`, it must match the JWT `sub`. Disabled hospitals return `403`.
 
 ---
 
@@ -422,7 +422,6 @@ Add a single patient with three mandatory documents. Returns `201`.
 
 | Field              | Type    | Required | Description                                              |
 | ------------------ | ------- | -------- | -------------------------------------------------------- |
-| `hospital_id`      | string  | ✅        | Must match JWT `sub`                                     |
 | `phone`            | string  | ✅        | Patient phone (E.164 or local digits)                    |
 | `name`             | string  | ✅        | Patient display name                                     |
 | `doctor_id`        | string  | —        | Attending doctor; must belong to this hospital           |
@@ -440,6 +439,8 @@ Allowed file types: PDF, JPG, PNG, HEIC/HEIF, WebP; max ~10 MB per file. Files a
 
 - **With `doctor_id`:** doctor must be affiliated with this hospital (checked via `DoctorHospital` junction). Creates/links user by phone. A `UserDoctor` bond (`HOSPITAL_ASSIGNED`) and a `UserHospital` membership row are written — both additive, so existing affiliations with other hospitals are preserved.
 - **Without `doctor_id`:** hospital-only patient — a `UserHospital` membership row is written; no `UserDoctor` bond is created.
+- The hospital is read from the JWT and is never accepted from this form. `Users` stores patient attributes only; hospital membership is stored in `UserHospital`.
+- Required `AuthTable`, `UserHospital`, and (when a doctor is supplied) `UserDoctor` writes must succeed. A failed required link returns an error and can be safely retried.
 - `insurer`, `age`, `gender` are written only when a **new** user row is created. Existing users (`status: "linked"`) are not updated for these fields — only their relation/hospital affiliation is ensured.
 
 **Response:**
@@ -455,9 +456,7 @@ Allowed file types: PDF, JPG, PNG, HEIC/HEIF, WebP; max ~10 MB per file. Files a
     "age": 42,
     "gender": "Male",
     "insurer": "Acme Health Insurance",
-    "hospital_id": "HOSP_1A2B3C4D",
-    "hospital_name": "City General Hospital",
-    "source": "hospital_import",
+    "source": "hospital_staff",
     "createdAt": "2026-03-29T..."
   },
   "documents": [
@@ -518,8 +517,7 @@ Uploaded documents are added as new versions (no old record deleted). OCR is enq
     "name": "Rahul Sharma",
     "age": 43,
     "insurer": "Acme Health Insurance",
-    "policy_number": "POL-12345",
-    "hospital_id": "HOSP_1A2B3C4D"
+    "policy_number": "POL-12345"
   },
   "documents": [
     {
@@ -533,6 +531,158 @@ Uploaded documents are added as new versions (no old record deleted). OCR is enq
 ```
 
 `doctor_action` is one of `"none"`, `"unchanged"`, or `"updated"`. `documents` is only present when at least one file was uploaded.
+
+---
+
+### GET `/hospitals/staff/patients/{user_id}/documents`
+
+List documents for a patient that the calling hospital is allowed to see: the
+patient's own self-uploads plus every document **this** hospital uploaded for
+them. Documents uploaded by other hospitals are never returned — `hospital_id`
+is taken from the JWT, not the request.
+
+**Auth:** `Authorization: Bearer <hospital JWT>`
+
+**Response:**
+
+```json
+{
+  "user_id": "usr_...",
+  "count": 2,
+  "documents": [
+    {
+      "file_id": "a1b2c3d4",
+      "filename": "lab_report.pdf",
+      "doc_type": "pdf",
+      "document_category": "PRESCRIPTION",
+      "source": "HOSPITAL",
+      "hospital_id": "HOSP_1A2B3C4D",
+      "ocr_status": "COMPLETED",
+      "created_at": "2026-06-20T10:15:00+00:00",
+      "download_url": "https://s3.amazonaws.com/..."
+    },
+    {
+      "file_id": "e5f6g7h8",
+      "filename": "insurance_card.jpg",
+      "doc_type": "jpg",
+      "document_category": "HEALTH_INSURANCE",
+      "source": "USER",
+      "hospital_id": null,
+      "ocr_status": "COMPLETED",
+      "created_at": "2026-05-02T08:00:00+00:00",
+      "download_url": "https://s3.amazonaws.com/..."
+    }
+  ]
+}
+```
+
+`download_url` is a presigned S3 URL, valid for 1 hour.
+
+---
+
+### POST `/hospitals/staff/patients/{user_id}/documents`
+
+Attach one or more documents to an **existing** patient, without going through
+`/add-patient` or `/update_patient`. Unlike those two, this doesn't require any
+patient form fields — just `user_id` in the path and files in the body.
+`hospital_id` is taken from the JWT and recorded as the upload source, same as
+every other staff upload path. Documents land in the same `MedilockerDocuments`
+table with `source=HOSPITAL`, so they immediately show up in both
+`GET /hospitals/staff/patients/{user_id}/documents` (this hospital's view) and
+the patient's own `GET /medilocker/users/{user_id}/files`.
+
+**Note:** there is no check that `user_id` is an existing patient or linked to
+this hospital — the caller is responsible for passing a valid `user_id`.
+
+**Auth:** `Authorization: Bearer <hospital JWT>`
+
+**Request:** `multipart/form-data`
+
+| Field      | Type          | Required | Description                                                                          |
+| ---------- | ------------- | -------- | --------------------------------------------------------------------------------------- |
+| `files`    | file[]        | Yes      | Repeated `files` field, one part per file                                               |
+| `metadata` | string (Form) | No       | JSON object keyed by filename: `{"scan.pdf": {"doc_type": "LAB_REPORT"}}`. `doc_type` defaults to `"OTHER"` when omitted — free-form, not restricted to the 3 admission document types. |
+
+**cURL example:**
+
+```bash
+curl -X POST "https://<API_BASE>/hospitals/staff/patients/usr_.../documents" \
+  -H "Authorization: Bearer <hospital JWT>" \
+  -F "files=@lab_report.pdf" \
+  -F "files=@followup_note.jpg" \
+  -F 'metadata={"lab_report.pdf":{"doc_type":"LAB_REPORT"}}'
+```
+
+**Response (201 Created):**
+
+```json
+{
+  "user_id": "usr_...",
+  "documents": [
+    {
+      "doc_type": "LAB_REPORT",
+      "document_category": "LAB_REPORT",
+      "file_id": "a5c55902",
+      "s3_original_key": "Medilocker/Users/usr_.../a5c55902/original.pdf"
+    },
+    {
+      "doc_type": "OTHER",
+      "document_category": "OTHER",
+      "file_id": "b80bb46a",
+      "s3_original_key": "Medilocker/Users/usr_.../b80bb46a/original.jpg"
+    }
+  ]
+}
+```
+
+OCR is enqueued asynchronously for each file, same as `/add-patient` and `/update_patient`.
+
+---
+
+### GET `/hospitals/staff/documents`
+
+Dashboard view: every document this hospital has uploaded, **across all
+patients** — not scoped to one `user_id`. Unlike
+`GET /patients/{user_id}/documents` (one patient, includes that patient's own
+uploads too), this returns **only** `source=HOSPITAL` documents this hospital
+uploaded, for every patient. Backed by the sparse `hospital-index` GSI on
+`MedilockerDocuments`, so other hospitals' documents and patient self-uploads
+never appear here.
+
+**Auth:** `Authorization: Bearer <hospital JWT>`
+
+**Response:**
+
+```json
+{
+  "hospital_id": "HOSP_1A2B3C4D",
+  "count": 2,
+  "documents": [
+    {
+      "user_id": "usr_a...",
+      "file_id": "f1",
+      "filename": "scan.pdf",
+      "doc_type": "pdf",
+      "document_category": "LAB_REPORT",
+      "ocr_status": "COMPLETED",
+      "created_at": "2026-06-29T10:00:00+00:00",
+      "download_url": "https://s3.amazonaws.com/..."
+    },
+    {
+      "user_id": "usr_b...",
+      "file_id": "f2",
+      "filename": "note.jpg",
+      "doc_type": "jpg",
+      "document_category": "OTHER",
+      "ocr_status": "PENDING",
+      "created_at": "2026-06-28T09:00:00+00:00",
+      "download_url": "https://s3.amazonaws.com/..."
+    }
+  ]
+}
+```
+
+`download_url` is a presigned S3 URL, valid for 1 hour.
 
 ---
 
@@ -584,62 +734,3 @@ Required: `hospital_id`, `phone`, `name`, `specialization`, `experience` (free-t
   "doctor": { "doctor_id": "dr_...", "...": "..." }
 }
 ```
-
----
-
-### POST `/hospitals/staff/import-patients`
-
-Stage a patient Excel file (.xlsx) for asynchronous processing (typically within 24 hours). Returns `202 Accepted`. The file is not processed inline — no row-level summaries are returned.
-
-**Content-Type:** `multipart/form-data`
-
-| Field         | Required | Description                                                                           |
-| ------------- | -------- | ------------------------------------------------------------------------------------- |
-| `hospital_id` | ✅        | Must match JWT `sub`; hospital must be active                                         |
-| `doctor_id`   | ✅        | Attending doctor; must belong to this hospital                                        |
-| `file`        | ✅        | `.xlsx` file; columns expected by processor: `phone` (required), `name` (required), `email` (optional) |
-
-**Response `202`:**
-
-```json
-{
-  "status": "accepted",
-  "import_kind": "patient",
-  "message": "Your file was received. Data will typically be live within 24 hours.",
-  "s3_key": "hospital_staff/patient_imports/HOSP_.../dr_.../20260331T120000Z_abc123def456.xlsx",
-  "manifest_key": "hospital_staff/patient_imports/HOSP_.../dr_.../20260331T120000Z_abc123def456.manifest.json",
-  "staging_id": "20260331T120000Z_abc123def456",
-  "eta_hours": 24
-}
-```
-
-API Gateway / Lambda payload limit (~6 MB) applies.
-
----
-
-### POST `/hospitals/staff/import-doctors`
-
-Stage a doctor Excel file (.xlsx) for asynchronous processing (typically within 24 hours). Returns `202 Accepted`. No inline row summaries.
-
-**Content-Type:** `multipart/form-data`
-
-| Field         | Required | Description                                                                                                                    |
-| ------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `hospital_id` | ✅        | Must match JWT `sub`; hospital must be active                                                                                  |
-| `file`        | ✅        | `.xlsx` file; columns expected by processor: `phone` (required), `name` (required), `specialization` (required), `experience` (required), `email` (optional) |
-
-**Response `202`:**
-
-```json
-{
-  "status": "accepted",
-  "import_kind": "doctor",
-  "message": "Your file was received. Data will typically be live within 24 hours.",
-  "s3_key": "hospital_staff/doctor_imports/HOSP_.../20260331T120000Z_abc123def456.xlsx",
-  "manifest_key": "hospital_staff/doctor_imports/HOSP_.../20260331T120000Z_abc123def456.manifest.json",
-  "staging_id": "20260331T120000Z_abc123def456",
-  "eta_hours": 24
-}
-```
-
-API Gateway / Lambda payload limit (~6 MB) applies.

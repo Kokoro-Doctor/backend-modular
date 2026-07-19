@@ -280,7 +280,7 @@ PUT /booking/plans/PLAN_12345678-1234-1234-1234-123456789012
 
 #### POST `/booking/subscriptions`
 
-Create a user subscription after successful payment. This endpoint should be called by the payment service after payment verification.
+Create a user subscription after successful payment. This endpoint should be called by the payment service after payment verification. It also upserts the persistent `(user_id, doctor_id)` bond into `UserDoctor` with `relation_type="USER_SUBSCRIPTION"`.
 
 ```json
 {
@@ -337,6 +337,22 @@ Get all subscribers for a doctor.
 
 ```
 GET /booking/doctors/DOC_12345678-1234-1234-1234-123456789012/subscribers
+```
+
+---
+
+#### GET `/booking/doctors/{doctor_id}/patients`
+
+Get all active patients linked to a doctor from the unified `UserDoctor` table. Includes both hospital-assigned patients and users who subscribed from the patient portal.
+
+**Path Parameters:**
+
+- `doctor_id`: Doctor ID
+
+**Example:**
+
+```
+GET /booking/doctors/DOC_12345678-1234-1234-1234-123456789012/patients
 ```
 
 ---

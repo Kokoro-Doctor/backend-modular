@@ -187,6 +187,7 @@ def create_hospital_relation(
     linked_by: str,
 ) -> dict:
     if relation_type not in {
+        RelationType.USER_SUBSCRIPTION,
         RelationType.HOSPITAL_ASSIGNED,
         RelationType.MANUAL,
         RelationType.SUBSCRIPTION,

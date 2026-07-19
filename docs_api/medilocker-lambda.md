@@ -2,43 +2,67 @@
 
 ### POST `/medilocker/upload`
 
-Upload medical files to user's medilocker.
+Upload medical files to user's medilocker. **`multipart/form-data`** — files
+are sent as raw bytes, not base64. (Previously a base64-in-JSON body; base64
+inflates payload size ~33%, which combined with API Gateway's hard 10 MB
+request limit could reject files under the documented 10 MB max before the
+Lambda ever ran. Multipart removes that overhead.)
 
-```json
-{
-  "user_id": "USR_12345678-1234-1234-1234-123456789012",
-  "files": [
-    {
-      "filename": "prescription.pdf",
-      "content": "JVBERi0xLjQKJeLjz9MKMy...",
-      "metadata": {
-        "type": "prescription",
-        "date": "2025-01-15"
-      }
-    },
-    {
-      "filename": "lab_report.jpg",
-      "content": "/9j/4AAQSkZJRgABAQAAAQ...",
-      "metadata": {
-        "type": "lab_report",
-        "date": "2025-01-10"
-      }
-    }
-  ]
-}
+**Request:** `multipart/form-data`
+
+| Field      | Type          | Required | Description                                                                                    |
+| ---------- | ------------- | -------- | ------------------------------------------------------------------------------------------------ |
+| `user_id`  | string (Form) | Yes      | Medilocker owner                                                                                  |
+| `files`    | file[]        | Yes      | Repeated `files` field, one part per file                                                         |
+| `metadata` | string (Form) | No       | JSON object keyed by filename, e.g. `{"lab_report.jpg": {"file_type": "lab_report", "date": "2025-01-10"}}` |
+
+**cURL example (multiple files):**
+
+```bash
+curl -X POST "https://<API_BASE>/medilocker/upload" \
+  -F "user_id=USR_12345678-1234-1234-1234-123456789012" \
+  -F "files=@prescription.pdf" \
+  -F "files=@lab_report.jpg" \
+  -F 'metadata={"prescription.pdf":{"type":"prescription","date":"2025-01-15"},"lab_report.jpg":{"type":"lab_report","date":"2025-01-10"}}'
 ```
 
 **Single file:**
 
+```bash
+curl -X POST "https://<API_BASE>/medilocker/upload" \
+  -F "user_id=USR_12345678-1234-1234-1234-123456789012" \
+  -F "files=@prescription.pdf"
+```
+
+`metadata` is optional — omit it entirely if you have no per-file metadata to attach. A filename with no matching key in `metadata` just gets `{}`.
+
+---
+
+### POST `/medilocker/upload/async`
+
+Same request shape as `POST /medilocker/upload` (images + PDFs accepted,
+`multipart/form-data`). Stores the file in S3, writes a `MedilockerDocuments`
+record with `ocr_status=PENDING, upload_mode=ASYNC`, then dispatches an SQS
+message to `OCRWorkerLambda` and returns **202** immediately instead of
+waiting for OCR. Poll `GET /medilocker/users/{user_id}/files/{file_id}/status`
+to track completion.
+
+**Request:** `multipart/form-data` — same `user_id` / `files` / `metadata` fields as `POST /medilocker/upload`.
+
+```bash
+curl -X POST "https://<API_BASE>/medilocker/upload/async" \
+  -F "user_id=USR_12345678-1234-1234-1234-123456789012" \
+  -F "files=@lab_report.pdf" \
+  -F 'metadata={"lab_report.pdf":{"file_type":"scan_report"}}'
+```
+
+**Response (202 Accepted):**
+
 ```json
 {
-  "user_id": "USR_12345678-1234-1234-1234-123456789012",
+  "message": "Files accepted for background processing",
   "files": [
-    {
-      "filename": "prescription.pdf",
-      "content": "JVBERi0xLjQKJeLjz9MKMy...",
-      "metadata": {}
-    }
+    { "file_id": "a1b2c3d4", "filename": "lab_report.pdf", "status": "PENDING" }
   ]
 }
 ```
@@ -110,6 +134,35 @@ GET /medilocker/users/USR_12345678-1234-1234-1234-123456789012/files/a1b2c3d4/do
 
 ---
 
+### GET `/medilocker/users/{user_id}/files/{file_id}/status`
+
+Poll OCR / structured-extraction progress for a single file. Used by the
+async upload flow (`POST /medilocker/upload/async`) to find out when
+processing finishes; also works for sync uploads.
+
+**Path Parameters:**
+
+- `user_id`: User ID (required)
+- `file_id`: File ID returned from upload (required)
+
+**Response:**
+
+```json
+{
+  "file_id": "a1b2c3d4",
+  "filename": "lab_report.pdf",
+  "ocr_status": "COMPLETED",
+  "structured_status": "COMPLETED",
+  "upload_mode": "ASYNC",
+  "document_category": "LAB_REPORT",
+  "updated_at": "2026-06-20T10:15:00+00:00"
+}
+```
+
+`ocr_status` / `structured_status`: `PENDING` \| `COMPLETED` \| `FAILED` \| `SKIPPED`. `upload_mode`: `LIVE` \| `ASYNC`. **404** if `file_id` doesn't exist for the given `user_id`.
+
+---
+
 ### DELETE `/medilocker/users/{user_id}/files/{file_id}`
 
 Delete a file from user's medilocker. Use `file_id` from the list response.
@@ -151,26 +204,24 @@ POST /medilocker/users/USR_12345678-1234-1234-1234-123456789012/prescription
 
 ### POST `/medilocker/users/{user_id}/prescription/save`
 
-Save an approved prescription to the patient's Medilocker. Stores the prescription as a document that appears in file listings and can be downloaded via the existing download endpoint. Document category is set to `PRESCRIPTION`.
+Save an approved prescription to the patient's Medilocker. Stores the prescription as a document that appears in file listings and can be downloaded via the existing download endpoint. Document category is set to `PRESCRIPTION`. **`multipart/form-data`** — the PDF is sent as raw bytes, not base64.
 
 **Path Parameters:**
 
 - `user_id`: Patient's user ID (Medilocker owner)
 
-**Request Body:**
+**Request:** `multipart/form-data`
 
-```json
-{
-  "prescription_pdf": "JVBERi0xLjQKJeLjz9MKMy..."
-}
-```
-
-**Note:** `prescription_pdf` must be base64-encoded PDF content.
+| Field      | Type          | Required | Description                                                         |
+| ---------- | ------------- | -------- | --------------------------------------------------------------------- |
+| `file`     | file          | Yes      | Prescription PDF                                                      |
+| `filename` | string (Form) | No       | Display filename override; defaults to the uploaded file's filename, or `Prescription_{date}_{time}.pdf` if that's also empty |
 
 **Example:**
 
-```
-POST /medilocker/users/USR_12345678-1234-1234-1234-123456789012/prescription/save
+```bash
+curl -X POST "https://<API_BASE>/medilocker/users/USR_12345678-1234-1234-1234-123456789012/prescription/save" \
+  -F "file=@Rx.pdf"
 ```
 
 **Response:**
@@ -338,6 +389,30 @@ curl -X POST "https://<API_BASE>/medilocker/insurance/analyze" \
 
 ---
 
+### POST `/medilocker/insurance/analyze/stream`
+
+Same input as `POST /medilocker/insurance/analyze` (single file,
+`multipart/form-data`), but streams progress over **Server-Sent Events**
+instead of waiting for the full pipeline to finish — useful for showing
+live chain-of-thought / node-by-node progress in the UI.
+
+**Request:** `multipart/form-data`
+
+| Field  | Type | Required | Description                          |
+| ------ | ---- | -------- | ------------------------------------- |
+| `file` | file | Yes      | Insurance document (image or PDF)    |
+
+**Response:** `text/event-stream`. Each SSE event's `event` name is the
+pipeline node that just completed (or `"update"`); `data` is a JSON payload
+for that node. The stream ends when the claim-validation graph finishes.
+
+```bash
+curl -N -X POST "https://<API_BASE>/medilocker/insurance/analyze/stream" \
+  -F "file=@/path/to/Claim_Form.pdf"
+```
+
+---
+
 ### POST `/medilocker/discharge/analyze`
 
 Extract structured discharge summary data and run patient-oriented analysis from a single document. **Multipart form upload** (not JSON) — same transport as insurance analyze. No `user_id` in the path (stateless).
@@ -467,147 +542,15 @@ Extract structured prescription data from uploaded files using GPT-4 Vision.
 
 ---
 
-## Hospital Raw Data (Medilocker Lambda)
+## Hospital Raw Data (REMOVED)
 
-Hospital raw data ingestion endpoints. No OCR, Textract, or GPT — storage only. All endpoints require `x-hospital-api-key` header.
-
-**Headers (required):**
-
-```
-x-hospital-api-key: YOUR_HOSPITAL_API_KEY
-```
-
----
-
-### POST `/hospital/upload`
-
-Direct API upload: receive file as multipart/form-data, store in S3 and DynamoDB.
-
-**Content-Type:** `multipart/form-data`
-
-**Form Fields:**
-
-- `hospital_id` (required)
-- `patient_id` (required)
-- `file` (required) — the file to upload
-
-**Example (curl):**
-
-```bash
-curl -X POST "API/hospital/upload" \
-  -H "x-hospital-api-key: YOUR_KEY" \
-  -F "hospital_id=HOSP_001" \
-  -F "patient_id=PAT_001" \
-  -F "file=@lab_report.pdf"
-```
-
-**Response:**
-
-```json
-{
-  "file_id": "a1b2c3d4",
-  "message": "File uploaded successfully"
-}
-```
-
-**Note:** Filenames with non-ASCII characters (e.g., narrow no-break spaces) are automatically sanitized for S3 metadata. Supported extensions: jpg, jpeg, png, heic, heif, webp, tiff, tif, bmp, pdf, doc, docx, xls, xlsx, csv, txt.
-
----
-
-### POST `/hospital/presign-upload`
-
-Generate presigned PUT URLs for direct S3 upload (supports multiple files). Hospital must call `POST /hospital/confirm-upload` after uploads complete.
-
-```json
-{
-  "hospital_id": "HOSP_001",
-  "patient_id": "PAT_001",
-  "files": [{ "filename": "lab_report.pdf" }, { "filename": "scan.pdf" }]
-}
-```
-
-**Single file:**
-
-```json
-{
-  "hospital_id": "HOSP_001",
-  "patient_id": "PAT_001",
-  "files": [{ "filename": "lab_report.pdf" }]
-}
-```
-
-**Response:**
-
-```json
-{
-  "uploads": [
-    {
-      "file_id": "a1b2c3d4",
-      "filename": "lab_report.pdf",
-      "upload_url": "https://s3.amazonaws.com/..."
-    },
-    {
-      "file_id": "e5f6g7h8",
-      "filename": "scan.pdf",
-      "upload_url": "https://s3.amazonaws.com/..."
-    }
-  ]
-}
-```
-
-**Note:** At least one file is required. Use `file_id` from each response item when calling `confirm-upload`.
-
----
-
-### POST `/hospital/confirm-upload`
-
-Confirm presigned uploads completed. Saves metadata to DynamoDB for each file. Call after successfully uploading files to the presigned URLs.
-
-```json
-{
-  "hospital_id": "HOSP_001",
-  "patient_id": "PAT_001",
-  "files": [
-    {
-      "file_id": "a1b2c3d4",
-      "filename": "lab_report.pdf",
-      "file_size": 102400
-    },
-    {
-      "file_id": "e5f6g7h8",
-      "filename": "scan.pdf",
-      "file_size": 204800
-    }
-  ]
-}
-```
-
-**Single file:**
-
-```json
-{
-  "hospital_id": "HOSP_001",
-  "patient_id": "PAT_001",
-  "files": [
-    {
-      "file_id": "a1b2c3d4",
-      "filename": "lab_report.pdf",
-      "file_size": 102400
-    }
-  ]
-}
-```
-
-**Response:**
-
-```json
-{
-  "confirmed": [
-    { "file_id": "a1b2c3d4", "message": "Upload confirmed, metadata saved" },
-    { "file_id": "e5f6g7h8", "message": "Upload confirmed, metadata saved" }
-  ],
-  "errors": []
-}
-```
+`POST /hospital/upload`, `POST /hospital/presign-upload`, and `POST /hospital/confirm-upload`
+(API-key auth, storage-only into a separate `HospitalFiles` table) have been
+**removed** from this Lambda. Hospitals now upload patient documents through
+the JWT-secured staff endpoints in [hospitals-lambda.md](hospitals-lambda.md)
+(`POST /hospitals/staff/add-patient`, `POST /hospitals/staff/update_patient`),
+which write into the same `MedilockerDocuments` table as patient self-uploads
+(tagged `source=HOSPITAL`). See `docs/DOCUMENT_UPLOAD_AND_ACCESS.md` for the
+full model.
 
 ---

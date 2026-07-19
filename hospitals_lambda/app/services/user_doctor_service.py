@@ -29,6 +29,7 @@ logger = get_logger(__name__)
 
 
 class RelationType:
+    USER_SUBSCRIPTION = "USER_SUBSCRIPTION"
     SUBSCRIPTION = "SUBSCRIPTION"
     HOSPITAL_ASSIGNED = "HOSPITAL_ASSIGNED"
     MANUAL = "MANUAL"
@@ -173,12 +174,9 @@ def get_doctor_patients(doctor_id: str) -> List[dict]:
 
 
 def get_active_hospital_assigned_doctor(user_id: str, hospital_id: str) -> Optional[dict]:
-    """The active HOSPITAL_ASSIGNED bond for a user originating at this hospital, or None."""
+    """The active doctor bond for a user originating at this hospital, or None."""
     for r in get_user_doctors(user_id):
-        if (
-            r.get("relation_type") == RelationType.HOSPITAL_ASSIGNED
-            and r.get("hospital_id") == hospital_id
-        ):
+        if r.get("hospital_id") == hospital_id:
             return r
     return None
 
@@ -208,3 +206,44 @@ def deactivate_relation(user_id: str, doctor_id: str) -> dict:
     except ClientError as e:
         logger.error(f"DynamoDB error deactivate_relation: {e}")
         raise HTTPException(500, "Failed to deactivate user-doctor relation")
+
+
+def remove_hospital_assignment(user_id: str, doctor_id: str, hospital_id: str) -> dict:
+    """Remove a hospital assignment without breaking an independent subscription link."""
+    active = get_relation_for_pair(user_id, doctor_id, active_only=True)
+    if not active:
+        raise HTTPException(404, "No active relation found for this user and doctor")
+    if active.get("hospital_id") != hospital_id:
+        return active
+
+    has_subscription_link = bool(active.get("subscription_id")) or active.get("relation_type") in {
+        RelationType.USER_SUBSCRIPTION,
+        RelationType.SUBSCRIPTION,
+    }
+    if not has_subscription_link:
+        return deactivate_relation(user_id, doctor_id)
+
+    now_iso = _now_iso()
+    try:
+        resp = USER_DOCTOR_TABLE.update_item(
+            Key={"user_id": user_id, "doctor_id": doctor_id},
+            UpdateExpression=(
+                "SET relation_type = :rt, linked_by = :lb, updated_at = :now "
+                "REMOVE hospital_id"
+            ),
+            ExpressionAttributeValues={
+                ":rt": RelationType.USER_SUBSCRIPTION,
+                ":lb": LinkedBy.SYSTEM,
+                ":now": now_iso,
+            },
+            ReturnValues="ALL_NEW",
+        )
+        out = resp.get("Attributes", active)
+        logger.info(
+            f"Removed hospital assignment but preserved subscription relation "
+            f"user={user_id} doctor={doctor_id} hospital={hospital_id}"
+        )
+        return out
+    except ClientError as e:
+        logger.error(f"DynamoDB error remove_hospital_assignment: {e}")
+        raise HTTPException(500, "Failed to remove hospital assignment")

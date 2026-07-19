@@ -94,6 +94,35 @@ async def upload_patient_docs(
     return results
 
 
+async def upload_documents_for_patient(
+    user_id: str,
+    hospital_id: str,
+    files: list[UploadFile],
+    metadata_by_filename: dict,
+) -> list[dict]:
+    """
+    Attach one or more arbitrary documents to an existing patient, on behalf
+    of a hospital — independent of the add-patient/update_patient forms.
+
+    Unlike upload_patient_docs (fixed 3 admission documents), this accepts any
+    number of files and a free-form doc_type per file (e.g. follow-up
+    prescriptions, lab reports, scans added after admission). doc_type
+    defaults to "OTHER" when not supplied. No check that user_id is an
+    existing/linked patient — caller is responsible for passing a valid one.
+
+    hospital_id is the uploading hospital (from the JWT) — recorded on each
+    doc the same way as upload_patient_docs/upload_single_doc.
+    """
+    results = []
+    for upload_file in files:
+        file_meta = (metadata_by_filename or {}).get(upload_file.filename) or {}
+        doc_type = (file_meta.get("doc_type") or "OTHER").strip().upper() or "OTHER"
+        result = await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
+        results.append(result)
+
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Per-document pipeline
 # ---------------------------------------------------------------------------
@@ -331,5 +360,69 @@ def list_patient_docs_for_hospital(user_id: str, hospital_id: str) -> list[dict]
     logger.info(
         f"[PATIENT_DOCS] Hospital view returned {len(docs)} doc(s) "
         f"user_id={user_id} hospital_id={hospital_id}"
+    )
+    return docs
+
+
+def list_documents_for_hospital(hospital_id: str) -> list[dict]:
+    """
+    Every document this hospital uploaded, across all patients — the hospital
+    dashboard view (as opposed to list_patient_docs_for_hospital, which is
+    scoped to one patient and also includes that patient's own uploads).
+
+    Uses the sparse hospital-index GSI (hospital_id -> created_at) on
+    MedilockerDocuments, so only source=HOSPITAL rows for this hospital are
+    ever returned — never another hospital's docs, and never patient
+    self-uploads. Newest first.
+    """
+    items: list[dict] = []
+    kwargs = {
+        "IndexName": "hospital-index",
+        "KeyConditionExpression": Key("hospital_id").eq(hospital_id),
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            response = DOCUMENTS_TABLE.query(**kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except ClientError as exc:
+        logger.error(
+            f"[PATIENT_DOCS] Hospital-wide query failed hospital_id={hospital_id}: {exc}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to fetch hospital documents")
+
+    docs = []
+    for doc in items:
+        s3_key = doc.get("s3_original_key")
+        download_url = None
+        if s3_key:
+            try:
+                download_url = s3_client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": S3_BUCKET, "Key": s3_key},
+                    ExpiresIn=3600,
+                )
+            except ClientError as exc:
+                logger.warning(
+                    f"[PATIENT_DOCS] Presign failed for {s3_key}: {exc}"
+                )
+        docs.append({
+            "user_id": doc.get("user_id"),
+            "file_id": doc.get("file_id"),
+            "filename": doc.get("filename"),
+            "doc_type": doc.get("doc_type"),
+            "document_category": doc.get("document_category"),
+            "ocr_status": doc.get("ocr_status"),
+            "created_at": doc.get("created_at"),
+            "download_url": download_url,
+        })
+
+    logger.info(
+        f"[PATIENT_DOCS] Hospital-wide view returned {len(docs)} doc(s) "
+        f"hospital_id={hospital_id}"
     )
     return docs

@@ -192,8 +192,16 @@ def _delete_user_scoped(user_id, deleted, errors):
         lambda i: {"subscription_id": i["subscription_id"]},
     ))
 
-    # User<->Doctor relations (GSI_UserRelations -> base key relation_id)
-    _safe(deleted, errors, "relations", lambda: _batch_delete(
+    # User<->Doctor unified relations (UserDoctor base key user_id + doctor_id)
+    _safe(deleted, errors, "user_doctor", lambda: _batch_delete(
+        config.user_doctor_table,
+        _query_all(config.user_doctor_table,
+                   KeyConditionExpression=Key("user_id").eq(user_id)),
+        lambda i: {"user_id": i["user_id"], "doctor_id": i["doctor_id"]},
+    ))
+
+    # Legacy UserDoctorRelations rows (GSI_UserRelations -> base key relation_id)
+    _safe(deleted, errors, "legacy_relations", lambda: _batch_delete(
         config.user_doctor_relations_table,
         _query_all(config.user_doctor_relations_table,
                    IndexName="GSI_UserRelations",
@@ -286,8 +294,17 @@ def _delete_doctor_scoped(doctor_id, deleted, errors):
         lambda i: {"subscription_id": i["subscription_id"]},
     ))
 
-    # User<->Doctor relations (GSI_DoctorRelations -> base key relation_id)
-    _safe(deleted, errors, "relations", lambda: _batch_delete(
+    # User<->Doctor unified relations (GSI_DoctorUsers -> base key user_id + doctor_id)
+    _safe(deleted, errors, "user_doctor", lambda: _batch_delete(
+        config.user_doctor_table,
+        _query_all(config.user_doctor_table,
+                   IndexName="GSI_DoctorUsers",
+                   KeyConditionExpression=Key("doctor_id").eq(doctor_id)),
+        lambda i: {"user_id": i["user_id"], "doctor_id": i["doctor_id"]},
+    ))
+
+    # Legacy UserDoctorRelations rows (GSI_DoctorRelations -> base key relation_id)
+    _safe(deleted, errors, "legacy_relations", lambda: _batch_delete(
         config.user_doctor_relations_table,
         _query_all(config.user_doctor_relations_table,
                    IndexName="GSI_DoctorRelations",
