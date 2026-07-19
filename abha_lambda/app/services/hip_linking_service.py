@@ -15,6 +15,7 @@ Async callback handlers live in routers/webhook_router.py, not here.
 import uuid
 from typing import List, Optional
 
+from app import config
 from app.abdm import hip_client
 from app.abdm.schemas import CareContextPatient
 from app.services import hospital_abdm_service, abdm_transactions_service
@@ -47,7 +48,6 @@ def register_facility(
     hospital_id: str,
     facility_id: str,
     facility_name: str,
-    bridge_id: str,
     hip_name: str,
     service_type: str = "HIP",
     active: bool = True,
@@ -59,9 +59,13 @@ def register_facility(
     hip_name becomes the ABDM serviceId (X-HIP-ID) for this hospital.
     Must be ≤15 characters, alphanumeric, unique per bridge per facility.
 
+    bridge_id is Kokoro's ABDM client ID (config.ABDM_CLIENT_ID), not
+    supplied by the caller.
+
     We use hip_name as a temporary hip_id to call the facility registration
     endpoint (it's a one-time setup, not a patient-specific call).
     """
+    bridge_id = config.ABDM_CLIENT_ID
     logger.info(
         "[HIPLinkingService] Registering facility hospital_id=%s facilityId=%s bridgeId=%s",
         hospital_id, facility_id, bridge_id,
@@ -78,11 +82,12 @@ def register_facility(
             }
         ],
     }
-    hip_client.post_facility(
+    abdm_response = hip_client.post_facility(
         "/v4/int/v1/bridges/MutipleHRPAddUpdateServices",
         payload,
         hip_id=hip_name,   # hipName == serviceId in ABDM
     )
+    logger.info("[HIPLinkingService] ABDM register_facility raw response: %s", abdm_response)
     logger.info("[HIPLinkingService] Facility registered with ABDM, saving to DB")
 
     # Persist so all subsequent HIP/HIU API calls can look up hip_id/hiu_id by hospital_id.
@@ -111,9 +116,8 @@ def find_bridge_by_service_id(service_id: str) -> dict:
     Returns the raw ABDM response — no DB involved.
     """
     logger.info("[HIPLinkingService] Finding bridge for service_id=%s", service_id)
-    return hip_client.get_facility(
-        "/v4/int/v1/bridges/getByServicesId",
-        params={"serviceId": service_id},
+    return hip_client.get_gateway(
+        f"/api/hiecm/gateway/v3/bridge-service/serviceId/{service_id}"
     )
 
 
@@ -121,16 +125,14 @@ def find_bridge_by_service_id(service_id: str) -> dict:
 # 3.2.7  Find services by bridge ID (live ABDM query)
 # ---------------------------------------------------------------------------
 
-def find_services_by_bridge_id(bridge_id: str) -> dict:
+def find_services_by_bridge_id() -> dict:
     """
-    Query ABDM for all services (HIP/HIU) registered under the given bridge ID.
+    Query ABDM for all services (HIP/HIU) registered under our bridge.
+    ABDM resolves the bridge from the bearer token — no bridgeId param exists.
     Returns the raw ABDM response — no DB involved.
     """
-    logger.info("[HIPLinkingService] Finding services for bridge_id=%s", bridge_id)
-    return hip_client.get_facility(
-        "/v4/int/v1/bridges/getServices",
-        params={"bridgeId": bridge_id},
-    )
+    logger.info("[HIPLinkingService] Finding services for our bridge")
+    return hip_client.get_gateway("/api/hiecm/gateway/v3/bridge-services")
 
 
 # ---------------------------------------------------------------------------

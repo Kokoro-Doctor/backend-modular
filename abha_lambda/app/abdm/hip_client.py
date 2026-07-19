@@ -100,9 +100,9 @@ def post_facility(path: str, payload: Any, hip_id: str) -> dict:
     return _handle_response(resp, path)
 
 
-def get_facility(path: str, params: dict) -> dict:
-    """GET from the facility registry host (3.2.6, 3.2.7 — different base URL)."""
-    url = f"{config.ABDM_FACILITY_REG_BASE_URL}{path}"
+def get_gateway(path: str) -> dict:
+    """GET from the ABDM gateway host (3.2.6 bridge-service lookup, 3.2.7 bridge-services list)."""
+    url = f"{config.ABDM_GATEWAY_BASE_URL}{path}"
     headers = {
         "Content-Type":  "application/json",
         "REQUEST-ID":    str(uuid.uuid4()),
@@ -110,8 +110,8 @@ def get_facility(path: str, params: dict) -> dict:
         "Authorization": f"Bearer {token_manager.get_access_token()}",
         "X-CM-ID":       config.ABDM_X_CM_ID,
     }
-    logger.debug("[HIPClient] GET (facility) %s params=%s", url, params)
-    resp = requests.get(url, params=params, headers=headers, timeout=20)
+    logger.debug("[HIPClient] GET (gateway) %s", url)
+    resp = requests.get(url, headers=headers, timeout=20)
     return _handle_response(resp, path)
 
 
@@ -136,9 +136,35 @@ def post_to_url(
 
 
 def _handle_response(resp: requests.Response, path: str) -> dict:
-    if resp.ok:
-        return resp.json() if resp.content else {}
-    _raise_error(resp, path)
+    if not resp.ok:
+        _raise_error(resp, path)
+
+    body = resp.json() if resp.content else {}
+    embedded_error = _extract_embedded_error(body)
+    if embedded_error:
+        code, message = embedded_error
+        logger.error(
+            "[HIPClient] Embedded error in %s response on %s — code=%s message=%s",
+            resp.status_code, path, code, message,
+        )
+        raise HTTPException(status_code=422, detail=f"ABDM error [{code}]: {message}")
+    return body
+
+
+def _extract_embedded_error(body: Any) -> Optional[tuple]:
+    """
+    Some ABDM endpoints (e.g. MutipleHRPAddUpdateServices) return HTTP 200
+    even on failure, with the error embedded in the body instead of the
+    status code — either as a bare {"error": {...}} or a list containing
+    one, e.g. [{"error": {"code": "2500", "message": "..."}}].
+    Returns (code, message) if such an error is found, else None.
+    """
+    items = body if isinstance(body, list) else [body]
+    for item in items:
+        if isinstance(item, dict) and isinstance(item.get("error"), dict):
+            error = item["error"]
+            return str(error.get("code", "unknown")), error.get("message", "Unknown ABDM error")
+    return None
 
 
 def _raise_error(resp: requests.Response, path: str):

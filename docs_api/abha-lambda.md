@@ -8,6 +8,36 @@ ABDM (Ayushman Bharat Digital Mission) integration: ABHA creation/login, profile
 
 **Async transaction tracking:** HIP linking calls (`generate-token`, `care-context`) write a **PENDING** row to **AbdmTransactions** keyed by `request_id`. ABDM callbacks flip the row to **COMPLETED** or **FAILED**. Use `GET /abha/transactions` to monitor status.
 
+## How to read the outbound ABDM call sections
+
+Each Kokoro wrapper API below now includes an **ABDM API called by Kokoro** section. The endpoint and payload shown there are the exact values assembled by the current service code, after Kokoro transforms the Postman request. Placeholder values such as `<RSA-encrypted Aadhaar>` and `<generated UUID>` represent runtime values.
+
+Kokoro uses three configured ABDM hosts:
+
+| Host setting                 | Current default                 | Used for                                                   |
+| ---------------------------- | ------------------------------- | ---------------------------------------------------------- |
+| `ABDM_ABHA_BASE_URL`         | `https://abhasbx.abdm.gov.in`   | ABHA enrollment, login, profile, and card                  |
+| `ABDM_GATEWAY_BASE_URL`      | `https://dev.abdm.gov.in`       | Gateway sessions, bridge, HIP, consent, and data-flow APIs |
+| `ABDM_FACILITY_REG_BASE_URL` | `https://apihspsbx.abdm.gov.in` | Facility/bridge registration and lookup                    |
+
+Before an outbound call, Kokoro obtains an ABDM gateway bearer token. If the cached token is missing or within 60 seconds of expiry, the wrapper first makes this supporting call:
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/gateway/v3/sessions
+```
+
+```json
+{
+  "clientId": "<ABDM_CLIENT_ID>",
+  "clientSecret": "<ABDM_CLIENT_SECRET>",
+  "grantType": "client_credentials"
+}
+```
+
+The token is cached in the warm Lambda execution context, so this session call is **conditional**, not repeated for every request. All later calls automatically include `Authorization: Bearer <gateway access token>`, `REQUEST-ID`, and `TIMESTAMP`. Gateway calls also include `X-CM-ID`; HIP/HIU calls include the hospital-specific `X-HIP-ID`/`X-HIU-ID`.
+
+Sensitive ABHA values are RSA-encrypted locally with the configured/hardcoded ABDM public key. The current execution path does **not** call the public-certificate API at runtime.
+
 ---
 
 ## Phase 0 — One-Time Platform Setup
@@ -23,6 +53,22 @@ Run these once per environment (dev/staging/prod) before anything else.
 Register Kokoro's deployed API base URL with ABDM. ABDM will POST all async callbacks to `{url}/api/v3/hip/...` and `{url}/api/v3/link/...`.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `hip_client.patch("/api/hiecm/gateway/v3/bridge/url", {"url": url})`
+
+```http
+PATCH {ABDM_GATEWAY_BASE_URL}/api/hiecm/gateway/v3/bridge/url
+```
+
+```json
+{
+  "url": "https://api.example.com"
+}
+```
+
+This outbound call has no `X-HIP-ID`; it uses the common gateway headers described above.
 
 **Postman setup:**
 
@@ -69,6 +115,32 @@ Register a hospital/facility with ABDM and store its config in Kokoro. Run once 
 
 **Auth required:** None
 
+**ABDM API called by Kokoro:**
+
+**Service call:** `hip_client.post_facility("/v4/int/v1/bridges/MutipleHRPAddUpdateServices", payload, hip_id=hip_name)`
+
+```http
+POST {ABDM_FACILITY_REG_BASE_URL}/v4/int/v1/bridges/MutipleHRPAddUpdateServices
+X-HIP-ID: CITYHOSPITAL01
+```
+
+```json
+{
+  "facilityId": "IN2810014366",
+  "facilityName": "City Hospital",
+  "HRP": [
+    {
+      "bridgeId": "SBXID_023051",
+      "hipName": "CITYHOSPITAL01",
+      "type": "HIP",
+      "active": true
+    }
+  ]
+}
+```
+
+`hospital_id` is Kokoro-only and is not sent to ABDM. `bridge_id` is not part of the request body — Kokoro fills `HRP[0].bridgeId` from `ABDM_CLIENT_ID` in its own config. Kokoro sends `hip_name` as both `HRP[0].hipName` and the temporary `X-HIP-ID` for this registration call. After ABDM succeeds, Kokoro saves the configuration in DynamoDB.
+
 **Postman setup:**
 
 - **Method:** POST
@@ -86,7 +158,6 @@ Content-Type: application/json
   "hospital_id": "hosp-uuid-789",
   "facility_id": "IN2810014366",
   "facility_name": "City Hospital",
-  "bridge_id": "SBXID_023051",
   "hip_name": "CITYHOSPITAL01",
   "service_type": "HIP",
   "active": true
@@ -105,22 +176,23 @@ Content-Type: application/json
 
 **Error responses:**
 
-- `422 HIS-1123` — Missing or invalid fields (wrong `facility_id` or `bridge_id`)
+- `422 HIS-1123` — Missing or invalid fields (wrong `facility_id`, or `ABDM_CLIENT_ID` misconfigured)
 - `500` — ABDM registration error
 
 **Field reference:**
 
-| Field           | Description                     | Example          | Notes                                                                             |
-| --------------- | ------------------------------- | ---------------- | --------------------------------------------------------------------------------- |
-| `hospital_id`   | Kokoro's internal hospital UUID | `hosp-uuid-789`  | Must be unique within Kokoro                                                      |
+| Field           | Description                     | Example          | Notes                                                                            |
+| --------------- | ------------------------------- | ---------------- | -------------------------------------------------------------------------------- |
+| `hospital_id`   | Kokoro's internal hospital UUID | `hosp-uuid-789`  | Must be unique within Kokoro                                                     |
 | `facility_id`   | HFR ID from ABDM                | `IN2810014366`   | **Must be a real, HFR-registered facility ID** — test IDs will return `HIS-1123` |
-| `facility_name` | Hospital/clinic display name    | `City Hospital`  | Human-readable, for logging                                                       |
-| `bridge_id`     | Kokoro's ABDM bridge identifier | `SBXID_023051`   | **Must be your bridge ID** from the ABDM developer portal — others' IDs rejected  |
-| `hip_name`      | ABDM service ID / X-HIP-ID      | `CITYHOSPITAL01` | ≤15 chars, alphanumeric only, **unique per bridge per facility**                  |
-| `service_type`  | Service type                    | `HIP`            | Always `HIP`                                                                      |
-| `active`        | Enable/disable                  | `true`           | Set to `false` to deactivate                                                      |
+| `facility_name` | Hospital/clinic display name    | `City Hospital`  | Human-readable, for logging                                                      |
+| `hip_name`      | ABDM service ID / X-HIP-ID      | `CITYHOSPITAL01` | ≤15 chars, alphanumeric only, **unique per bridge per facility**                 |
+| `service_type`  | Service type                    | `HIP`            | Always `HIP`                                                                     |
+| `active`        | Enable/disable                  | `true`           | Set to `false` to deactivate                                                     |
 
-**What Kokoro sends to ABDM internally:**
+`bridge_id` is not a request field — it's read server-side from `ABDM_CLIENT_ID` in the Lambda's config/environment.
+
+**Payload transformation reference:**
 
 Kokoro transforms your request into the ABDM `MutipleHRPAddUpdateServices` format before forwarding:
 
@@ -144,7 +216,7 @@ Kokoro transforms your request into the ABDM `MutipleHRPAddUpdateServices` forma
 - **Save `hospital_id`** — use it in all Phase 2 linking calls
 - `hip_name` becomes the `X-HIP-ID` header sent to ABDM on every subsequent HIP call
 - `facility_id` must exist in the **HFR sandbox** (`https://facility.abdm.gov.in`) — ABDM validates it in real-time
-- `bridge_id` must be the bridge assigned to your ABDM developer account
+- `bridge_id` is taken from `ABDM_CLIENT_ID` in the Lambda's own config — make sure that matches the bridge assigned to your ABDM developer account
 - After registering, verify with step 3 (`find-bridge`) that ABDM reflects the correct data
 
 ---
@@ -156,6 +228,16 @@ Query ABDM directly for the bridge associated with a given service (HIP/HIU) ID.
 Use this after `register-facility` to confirm ABDM has the correct bridge mapping.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `hip_client.get_gateway(f"/api/hiecm/gateway/v3/bridge-service/serviceId/{service_id}")`
+
+```http
+GET {ABDM_GATEWAY_BASE_URL}/api/hiecm/gateway/v3/bridge-service/serviceId/CITYHOSPITAL01
+```
+
+There is no JSON body. Kokoro maps its `service_id` query parameter to ABDM's `{serviceId}` path segment on the gateway host (not the facility-reg host used by 3.2.5/3.2.7). No `X-HIP-ID` is sent on this lookup.
 
 **Postman setup:**
 
@@ -194,8 +276,8 @@ GET {{base_url}}/abha/bridge/find-bridge?service_id=CITYHOSPITAL01
 
 **Query parameter:**
 
-| Param        | Description                           | Example          |
-| ------------ | ------------------------------------- | ---------------- |
+| Param        | Description                                    | Example          |
+| ------------ | ---------------------------------------------- | ---------------- |
 | `service_id` | The ABDM service ID (= `hip_name` from step 2) | `CITYHOSPITAL01` |
 
 ---
@@ -208,17 +290,27 @@ Use this to see everything registered under your bridge — useful to audit all 
 
 **Auth required:** None
 
+**ABDM API called by Kokoro:**
+
+**Service call:** `hip_client.get_gateway("/api/hiecm/gateway/v3/bridge-services")`
+
+```http
+GET {ABDM_GATEWAY_BASE_URL}/api/hiecm/gateway/v3/bridge-services
+```
+
+There is no JSON body and **no query params** — ABDM resolves the bridge from the bearer token used to authenticate the call. Kokoro's route takes no parameters either; it always returns the services registered under the bridge tied to your `ABDM_CLIENT_ID`. No `X-HIP-ID` is sent on this lookup.
+
 **Postman setup:**
 
 - **Method:** GET
-- **URL:** `{{base_url}}/abha/bridge/services?bridge_id={{bridge_id}}`
+- **URL:** `{{base_url}}/abha/bridge/services`
 - **Headers:** None required
 - **Body:** (none)
 
 **Example:**
 
 ```
-GET {{base_url}}/abha/bridge/services?bridge_id=SBXID_023051
+GET {{base_url}}/abha/bridge/services
 ```
 
 **Success response (200) — raw ABDM response:**
@@ -250,12 +342,6 @@ GET {{base_url}}/abha/bridge/services?bridge_id=SBXID_023051
 - `404` — Bridge ID not found in ABDM
 - `502` — ABDM returned an unexpected error
 
-**Query parameter:**
-
-| Param       | Description                                    | Example        |
-| ----------- | ---------------------------------------------- | -------------- |
-| `bridge_id` | Your ABDM bridge ID (= `bridge_id` from step 2) | `SBXID_023051` |
-
 ---
 
 ### 5. GET `/abha/bridge/hospitals` — Kokoro DB snapshot
@@ -265,6 +351,8 @@ List all hospitals registered in Kokoro's DynamoDB. **Reads from DB — not a li
 Use this to retrieve `hospital_id` values before calling Phase 2 endpoints, or to cross-check the DB state against the live ABDM data from steps 3 and 4.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:** None. This endpoint scans Kokoro's **HospitalAbdmConfig** DynamoDB table only; ABDM receives nothing.
 
 **Postman setup:**
 
@@ -318,6 +406,26 @@ Request OTP to the mobile linked to the user's Aadhaar. The OTP is sent by ABDM.
 
 **Auth required:** None
 
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/enrollment/request/otp", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/enrollment/request/otp
+```
+
+```json
+{
+  "txnId": "",
+  "scope": ["abha-enrol"],
+  "loginHint": "aadhaar",
+  "loginId": "<RSA-encrypted Aadhaar>",
+  "otpSystem": "aadhaar"
+}
+```
+
+The plaintext `aadhaar` from Postman is never forwarded. Kokoro strips surrounding whitespace, RSA-OAEP encrypts it locally, Base64-encodes the ciphertext, and sends that value as `loginId`.
+
 **Postman setup:**
 
 - **Method:** POST
@@ -358,6 +466,33 @@ Request OTP to the mobile linked to the user's Aadhaar. The OTP is sent by ABDM.
 Verify the OTP and create or retrieve the ABHA account. Saves profile + tokens to **AbhaAccounts**.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/enrollment/enrol/byAadhaar", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/enrollment/enrol/byAadhaar
+```
+
+```json
+{
+  "authData": {
+    "authMethods": ["otp"],
+    "otp": {
+      "txnId": "abc123-txn-id-from-abdm",
+      "otpValue": "<RSA-encrypted OTP>",
+      "mobile": "9587733170"
+    }
+  },
+  "consent": {
+    "code": "abha-enrollment",
+    "version": "1.4"
+  }
+}
+```
+
+The OTP is encrypted locally; `txn_id` is renamed to `txnId`. The `mobile` value is sent as plaintext inside the ABDM enrollment payload exactly as received by this wrapper.
 
 **Postman setup:**
 
@@ -418,6 +553,26 @@ ABHA Mobile Verification (Milestone 1 §3.0 Step 4a). Sends an OTP to the mobile
 
 **Auth required:** None
 
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/enrollment/request/otp", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/enrollment/request/otp
+```
+
+```json
+{
+  "txnId": "abc123-txn-id-from-abdm",
+  "scope": ["abha-enrol", "mobile-verify"],
+  "loginHint": "mobile",
+  "loginId": "<RSA-encrypted mobile number>",
+  "otpSystem": "abdm"
+}
+```
+
+Kokoro encrypts the plaintext `mobile` locally and sends the ciphertext as `loginId`.
+
 **Postman setup:**
 
 - **Method:** POST
@@ -457,6 +612,30 @@ ABHA Mobile Verification (Milestone 1 §3.0 Step 4a). Sends an OTP to the mobile
 ABHA Mobile Verification (§3.0 Step 4b). Verifies the OTP and links the mobile to the ABHA. Note: this hits ABDM's `/enrollment/auth/byAbdm` endpoint and returns no tokens/profile.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/enrollment/auth/byAbdm", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/enrollment/auth/byAbdm
+```
+
+```json
+{
+  "scope": ["abha-enrol", "mobile-verify"],
+  "authData": {
+    "authMethods": ["otp"],
+    "otp": {
+      "timeStamp": "<current UTC time, ISO 8601 with milliseconds>",
+      "txnId": "abc123-txn-id-from-abdm",
+      "otpValue": "<RSA-encrypted OTP>"
+    }
+  }
+}
+```
+
+`timeStamp` is generated by Kokoro at call time; it is not accepted from Postman.
 
 **Postman setup:**
 
@@ -498,6 +677,31 @@ ABHA Mobile Verification (§3.0 Step 4b). Verifies the OTP and links the mobile 
 Fetch the live ABHA profile from ABDM using the `abha_number` from step 5.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.get("/abha/api/v3/profile/account", user_token=user_token)`
+
+```http
+GET {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/account
+X-Token: Bearer <stored ABDM user access token>
+```
+
+There is no query string or JSON body on the ABDM call. `abha_number` is used only to find the saved user token in Kokoro's **AbhaAccounts** table; it is not forwarded to this ABDM endpoint.
+
+If the saved access token is expired but the refresh token is still valid, Kokoro first makes this conditional call and persists the replacement token pair:
+
+**Conditional service call:** `abdm_client.post("/abha/api/v3/profile/login/verify/user/token", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/login/verify/user/token
+```
+
+```json
+{
+  "refreshToken": "<stored ABDM refresh token>"
+}
+```
 
 **Postman setup:**
 
@@ -545,9 +749,21 @@ GET {{base_url}}/abha/profile?abha_number=12-3456-7890-1234
 
 #### 7. GET `/abha/card` _(optional)_
 
-Download the official ABHA card as a Base64-encoded PDF.
+Download the official ABHA card as a Base64-encoded PNG image.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.get("/abha/api/v3/profile/account/abha-card", user_token=user_token, raw=True, accept="image/png")`
+
+```http
+GET {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/account/abha-card
+X-Token: Bearer <stored ABDM user access token>
+Accept: image/png
+```
+
+There is no query string or JSON body on the ABDM call. `abha_number` is only used for Kokoro's token lookup. If the saved access token has expired, the same conditional token-refresh call documented under `GET /abha/profile` runs first.
 
 **Postman setup:**
 
@@ -566,7 +782,7 @@ GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
 
 ```json
 {
-  "card_base64": "JVBERi0xLjQKJeLjz9MNCjEgMCBvYmogICUgRW50cnkgcG9pbnQ..."
+  "card_base64": "iVBORw0KGgoAAAANSUhEUgAA..."
 }
 ```
 
@@ -579,9 +795,9 @@ GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
 
 **Important notes:**
 
-- `card_base64` is a complete PDF file encoded as Base64
-- **To decode in terminal:** `echo 'JVBERi...' | base64 -d > card.pdf && open card.pdf`
-- The PDF contains the official ABHA card with QR code
+- `card_base64` is a complete PNG image encoded as Base64
+- **To decode in terminal:** `echo 'iVBORw0...' | base64 -d > card.png && open card.png`
+- The PNG contains the official ABHA card with QR code
 
 ---
 
@@ -594,6 +810,25 @@ GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
 Request OTP for an existing ABHA number. OTP is sent to the mobile registered with that ABHA.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/profile/login/request/otp", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/login/request/otp
+```
+
+```json
+{
+  "scope": ["abha-login", "aadhaar-verify"],
+  "loginHint": "abha-number",
+  "loginId": "<RSA-encrypted ABHA number>",
+  "otpSystem": "aadhaar"
+}
+```
+
+The plaintext `abha_number` is encrypted locally and only its Base64 ciphertext is sent as `loginId`.
 
 **Postman setup:**
 
@@ -635,6 +870,40 @@ Request OTP for an existing ABHA number. OTP is sent to the mobile registered wi
 Verify OTP and log in to ABHA. Saves fresh profile + tokens to **AbhaAccounts**.
 
 **Auth required:** None
+
+**ABDM APIs called by Kokoro:**
+
+**Primary service call:** `abdm_client.post("/abha/api/v3/profile/login/verify", payload)`
+
+**Conditional profile call:** `abdm_client.get("/abha/api/v3/profile/account", user_token=new_user_token)`
+
+Primary login verification call:
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/login/verify
+```
+
+```json
+{
+  "scope": ["abha-login", "aadhaar-verify"],
+  "authData": {
+    "authMethods": ["otp"],
+    "otp": {
+      "txnId": "def456-txn-id-from-abdm",
+      "otpValue": "<RSA-encrypted OTP>"
+    }
+  }
+}
+```
+
+If ABDM's verification response does not contain `ABHAProfile` but does contain a user token, Kokoro makes this second call automatically:
+
+```http
+GET {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/account
+X-Token: Bearer <new user token returned by login/verify>
+```
+
+The second call has no body. Kokoro then saves the normalized profile and token data in **AbhaAccounts**.
 
 **Postman setup:**
 
@@ -689,6 +958,8 @@ Verify OTP and log in to ABHA. Saves fresh profile + tokens to **AbhaAccounts**.
 
 Same as Option A step 6. Use `abha_number` from the login response above.
 
+**ABDM API called by Kokoro:** Identical to [Option A step 6](#6-get-abhaprofile-optional), including the conditional user-token refresh call.
+
 ```
 GET {{base_url}}/abha/profile?abha_number=12-3456-7890-1234
 ```
@@ -700,6 +971,8 @@ See [Option A step 6](#6-get-abhaprofile-optional) for full request/response det
 #### 7. GET `/abha/card` _(optional)_
 
 Same as Option A step 7. Use `abha_number` from the login response above.
+
+**ABDM API called by Kokoro:** Identical to [Option A step 7](#7-get-abhacard-optional), including the conditional user-token refresh call.
 
 ```
 GET {{base_url}}/abha/card?abha_number=12-3456-7890-1234
@@ -720,6 +993,25 @@ Login using only the registered **mobile number** — the user does not need to 
 Request OTP for a mobile number. OTP is sent to that mobile via the ABDM OTP system.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/profile/login/request/otp", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/login/request/otp
+```
+
+```json
+{
+  "scope": ["abha-login", "mobile-verify"],
+  "loginHint": "mobile",
+  "loginId": "<RSA-encrypted mobile number>",
+  "otpSystem": "abdm"
+}
+```
+
+The plaintext `mobile` is encrypted locally and only its Base64 ciphertext is sent as `loginId`.
 
 **Postman setup:**
 
@@ -760,6 +1052,29 @@ Request OTP for a mobile number. OTP is sent to that mobile via the ABDM OTP sys
 Verify the OTP. Returns a **short-lived (5 min) `t_token`** and the list of ABHA accounts linked to the mobile. **No session is created yet** — pick one account and continue to step 6a.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `abdm_client.post("/abha/api/v3/profile/login/verify", payload)`
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/login/verify
+```
+
+```json
+{
+  "scope": ["abha-login", "mobile-verify"],
+  "authData": {
+    "authMethods": ["otp"],
+    "otp": {
+      "txnId": "ghi789-txn-id-from-abdm",
+      "otpValue": "<RSA-encrypted OTP>"
+    }
+  }
+}
+```
+
+ABDM returns the short-lived token and linked account list. Kokoro does not call the profile API in this step.
 
 **Postman setup:**
 
@@ -814,6 +1129,37 @@ Verify the OTP. Returns a **short-lived (5 min) `t_token`** and the list of ABHA
 Select one ABHA account from step 5a and obtain the final session token. Saves fresh profile + tokens to **AbhaAccounts**.
 
 **Auth required:** None (the short-lived `t_token` is passed in the body, not as an auth header)
+
+**ABDM APIs called by Kokoro:**
+
+**Primary service call:** `abdm_client.post("/abha/api/v3/profile/login/verify/user", payload, extra_headers={"T-token": "Bearer <t_token>"})`
+
+**Conditional profile call:** `abdm_client.get("/abha/api/v3/profile/account", user_token=new_user_token)`
+
+Primary account-selection call:
+
+```http
+POST {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/login/verify/user
+T-token: Bearer <t_token from step 5a>
+```
+
+```json
+{
+  "ABHANumber": "91-2568-7073-XXXX",
+  "txnId": "ghi789-txn-id-from-abdm"
+}
+```
+
+Although Postman sends `t_token` inside the Kokoro wrapper body, Kokoro removes it from the ABDM JSON payload and forwards it in the `T-token` header. `abha_number` is renamed to `ABHANumber`.
+
+If ABDM's response does not include `ABHAProfile` but does include a final user token, Kokoro then makes:
+
+```http
+GET {ABDM_ABHA_BASE_URL}/abha/api/v3/profile/account
+X-Token: Bearer <new final user token>
+```
+
+The second call has no body. Kokoro saves the resulting profile and token pair in **AbhaAccounts**.
 
 **Postman setup:**
 
@@ -873,6 +1219,8 @@ After the patient has created or logged into their ABHA (Phase 1 Options A–C),
 
 Quick summary: send `{ abha_number, hospital_id }` to `POST /auth/abha/signup-user`. It sources phone/name/email from the `AbhaAccounts` row, creates+links the user, writes `kokoro_user_id` back onto the ABHA row, and returns a JWT. Login afterward is `POST /auth/login` with the mobile (passwordless).
 
+**ABDM API called by Kokoro:** None. This auth-lambda wrapper provisions the Kokoro user from data already saved in Kokoro's tables; ABDM receives nothing.
+
 ---
 
 ## Phase 2 — HIP-Initiated Linking (Milestone 2)
@@ -886,6 +1234,40 @@ Hospital initiates record linking with ABDM. All linking calls are **asynchronou
 Ask ABDM to generate a link token for a patient at a specific hospital. ABDM calls back to `/api/v3/hip/token/on-generate-token` with the token.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `hip_client.post("/api/hiecm/v3/token/generate-token", payload, hip_id=hip_id, request_id=request_id)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/v3/token/generate-token
+X-HIP-ID: <hip_id resolved from hospital_id>
+REQUEST-ID: <generated request_id returned by this wrapper>
+```
+
+When the wrapper request uses an ABHA address, Kokoro sends:
+
+```json
+{
+  "name": "John Doe",
+  "gender": "M",
+  "yearOfBirth": 1990,
+  "abhaAddress": "john.doe@abdm"
+}
+```
+
+When it uses an ABHA number, Kokoro sends the same payload with this identity field instead:
+
+```json
+{
+  "name": "John Doe",
+  "gender": "M",
+  "yearOfBirth": 1990,
+  "abhaNumber": "12-3456-7890-1234"
+}
+```
+
+`hospital_id` is not sent in the ABDM body. Kokoro uses it to resolve `X-HIP-ID`. The same generated UUID is saved in **AbdmTransactions**, sent as the ABDM `REQUEST-ID` header, and returned to Postman as `request_id` for callback correlation.
 
 **Postman setup:**
 
@@ -953,6 +1335,8 @@ Content-Type: application/json
 
 ABDM POSTs the link token here after processing step 8. **You do not call this — ABDM does.**
 
+**Outbound ABDM API called by Kokoro:** None. This is an inbound ABDM callback. Kokoro stores the token and updates DynamoDB, then returns HTTP `202` with `{}`.
+
 **Triggered by:** ABDM after a successful `generate-token` request
 
 **What ABDM sends:**
@@ -988,6 +1372,8 @@ TIMESTAMP: 2025-05-27T10:16:30Z
 Poll this after step 8 to confirm ABDM sent the link token callback.
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:** None. This endpoint reads Kokoro's **AbdmTransactions** DynamoDB table only; ABDM receives nothing.
 
 **Postman setup:**
 
@@ -1061,6 +1447,44 @@ Link care contexts (medical records) to the patient's ABHA. Uses the link token 
 
 **Auth required:** None
 
+**ABDM API called by Kokoro:**
+
+**Service call:** `hip_client.post("/api/hiecm/hip/v3/link/carecontext", payload, hip_id=hip_id, link_token=link_token, request_id=request_id)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/hip/v3/link/carecontext
+X-HIP-ID: <hip_id resolved from hospital_id>
+X-LINK-TOKEN: <stored hospital-scoped link token>
+REQUEST-ID: <generated request_id returned by this wrapper>
+```
+
+```json
+{
+  "abhaAddress": "john.doe@abdm",
+  "patient": [
+    {
+      "referenceNumber": "PAT-001",
+      "display": "John Doe",
+      "careContexts": [
+        {
+          "referenceNumber": "CC-2025-001",
+          "display": "OPD Consultation on 15 Jan 2025"
+        },
+        {
+          "referenceNumber": "CC-2025-002",
+          "display": "Blood Work on 20 Jan 2025"
+        }
+      ],
+      "hiType": "OPConsultation",
+      "count": 2
+    }
+  ],
+  "abhaNumber": "12-3456-7890-1234"
+}
+```
+
+`hospital_id` is used only to resolve `X-HIP-ID` and the hospital-scoped `X-LINK-TOKEN`; it is not included in the ABDM body. `patient` is serialized from the validated wrapper request. `abhaNumber` is included whenever Kokoro resolves or receives it.
+
 **Postman setup:**
 
 - **Method:** POST
@@ -1083,7 +1507,7 @@ Content-Type: application/json
       "referenceNumber": "PAT-001",
       "display": "John Doe",
       "hiType": "OPConsultation",
-      "count": 1,
+      "count": 2,
       "careContexts": [
         {
           "referenceNumber": "CC-2025-001",
@@ -1131,6 +1555,8 @@ Content-Type: application/json
 ### 12. POST `/api/v3/link/on_carecontext` ← ABDM → Kokoro callback
 
 ABDM POSTs the linking result here after processing step 11. **You do not call this — ABDM does.**
+
+**Outbound ABDM API called by Kokoro:** None. This callback only updates the matching **AbdmTransactions** row and returns HTTP `202` with `{}`.
 
 **Triggered by:** ABDM after processing a `care-context` request
 
@@ -1185,6 +1611,8 @@ REQUEST-ID: <new-uuid>
 ---
 
 ### 13. GET `/abha/transactions` — Check linking status
+
+**ABDM API called by Kokoro:** None. This is the same DB-only transaction inspection wrapper described in step 10; ABDM receives nothing.
 
 Poll this after step 11 to confirm ABDM confirmed or rejected the care context linking.
 
@@ -1256,6 +1684,7 @@ Poll this after step 11 to confirm ABDM confirmed or rejected the care context l
 Triggered after Phase 2 linking is complete. The patient approves a consent request (via ABDM/HIU), ABDM notifies Kokoro, and Kokoro pushes the health records to the HIU.
 
 **How it works:**
+
 - Steps 14 and 16 are **inbound callbacks from ABDM** — you don't call them, ABDM does.
 - After each inbound callback, Kokoro **automatically** fires the outbound calls (steps 15, 17–19).
 - As a developer you only need to **monitor** the flow using `GET /abha/transactions`.
@@ -1270,9 +1699,12 @@ Triggered after Phase 2 linking is complete. The patient approves a consent requ
 
 ABDM POSTs the full consent artefact here when a patient approves (or revokes) a consent request. **You do not call this — ABDM does.**
 
+**ABDM API automatically called by Kokoro:** `POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/consent/v3/request/hip/on-notify`. See step 15 immediately below for the exact acknowledgment payload built from this callback.
+
 **Triggered by:** Patient approving a consent request in the ABDM app/PHR app.
 
 **What ABDM sends:**
+
 ```
 POST {bridge_url}/api/v3/consent/request/hip/notify
 X-HIP-ID: CITYHOSPITAL01
@@ -1315,6 +1747,7 @@ TIMESTAMP: 2025-05-27T10:00:00.000Z
 ```
 
 **What Kokoro does automatically:**
+
 1. Persists the full consent artefact to **ConsentArtefacts** table (keyed by `consentId`)
 2. Fires the **step 15** acknowledgement to ABDM (6.3.2)
 3. Returns `{}` HTTP `202` to ABDM
@@ -1333,7 +1766,10 @@ TIMESTAMP: 2025-05-27T10:00:00.000Z
 
 Kokoro fires this automatically after step 14, acknowledging receipt of the consent notification. **Not callable from Postman.**
 
+**Service call:** `hip_client.post("/api/hiecm/consent/v3/request/hip/on-notify", payload, hip_id=hip_id, request_id=<new UUID>)`
+
 **Body Kokoro sends to ABDM:**
+
 ```json
 {
   "acknowledgement": {
@@ -1354,9 +1790,18 @@ Kokoro fires this automatically after step 14, acknowledging receipt of the cons
 
 ABDM forwards the HIU's data request here: the `consentId`, `dataPushUrl` (where to push the records), and the HIU's ECDH public key for encryption. **You do not call this — ABDM does.**
 
+**APIs automatically called by Kokoro:**
+
+1. `POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/data-flow/v3/health-information/hip/on-request` — acknowledge ABDM (step 17).
+2. `POST {hiRequest.dataPushUrl}` — push encrypted FHIR data directly to the HIU (step 18).
+3. `POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/data-flow/v3/health-information/notify` — report transfer status to ABDM (step 19).
+
+The exact payload for each call is shown in steps 17–19 below.
+
 **Triggered by:** HIU requesting the health data after consent is granted.
 
 **What ABDM sends:**
+
 ```
 POST {bridge_url}/api/v3/hip/health-information/request
 X-HIP-ID: CITYHOSPITAL01
@@ -1389,6 +1834,7 @@ TIMESTAMP: 2025-05-27T10:05:00.000Z
 ```
 
 **What Kokoro does automatically (the full 6.3.3 → 6.3.6 orchestration):**
+
 1. Records a `PENDING` row in **AbdmTransactions** keyed by `transactionId`
 2. Fires **step 17** acknowledgement immediately
 3. Looks up the consent artefact from **ConsentArtefacts** (saved in step 14)
@@ -1405,9 +1851,11 @@ TIMESTAMP: 2025-05-27T10:05:00.000Z
 | `hiRequest.keyMaterial` | HIU's ECDH public key — used to encrypt records |
 
 **To monitor this flow:**
+
 ```
 GET {{base_url}}/abha/transactions?request_id={{transaction_id}}
 ```
+
 - `PENDING` = acknowledgement sent, waiting for push+notify to complete
 - `COMPLETED` = data pushed and CM notified
 - `FAILED` = push or notify failed (see `callback_payload.error`)
@@ -1418,7 +1866,10 @@ GET {{base_url}}/abha/transactions?request_id={{transaction_id}}
 
 Kokoro fires this immediately after step 16, acknowledging the HI request. **Not callable from Postman.**
 
+**Service call:** `hip_client.post("/api/hiecm/data-flow/v3/health-information/hip/on-request", payload, hip_id=hip_id, request_id=<new UUID>)`
+
 **Body Kokoro sends to ABDM:**
+
 ```json
 {
   "hiRequest": {
@@ -1439,11 +1890,14 @@ Kokoro fires this immediately after step 16, acknowledging the HI request. **Not
 
 Kokoro pushes the encrypted FHIR records directly to the HIU's `dataPushUrl` from step 16. **Not callable from Postman — target URL is HIU-controlled.**
 
+**Service call:** `hip_client.post_to_url(data_push_url, payload, hip_id=hip_id, request_id=<new UUID>)`
+
 **Encryption:** ECDH Curve25519 key exchange against the HIU's public key from step 16. Each FHIR bundle is AES-GCM encrypted. The HIP's own ephemeral public key + nonce (`keyMaterial`) is sent alongside so the HIU can derive the same shared secret and decrypt.
 
 > **Current status:** The encryption module (`app/abdm/data_encryption.py`) is now implemented (real X25519 ECDH + AES-256-GCM). The push therefore completes and the `AbdmTransactions` row reaches `COMPLETED`. **Caveat:** until `_build_fhir_bundle()` is replaced with real clinical-record assembly, the encrypted payload contains a placeholder (empty) FHIR bundle — wire it to Kokoro's clinical store before certification.
 
 **Body Kokoro sends to HIU:**
+
 ```json
 {
   "pageNumber": 1,
@@ -1478,7 +1932,10 @@ Kokoro pushes the encrypted FHIR records directly to the HIU's `dataPushUrl` fro
 
 Kokoro tells the CM whether the data transfer succeeded. Fired after step 18 completes. **Not callable from Postman.**
 
+**Service call:** `hip_client.post("/api/hiecm/data-flow/v3/health-information/notify", payload, hip_id=hip_id, request_id=<new UUID>)`
+
 **Body on success:**
+
 ```json
 {
   "notification": {
@@ -1505,6 +1962,7 @@ Kokoro tells the CM whether the data transfer succeeded. Fired after step 18 com
 ```
 
 **Body on failure:**
+
 ```json
 {
   "notification": {
@@ -1530,6 +1988,7 @@ Kokoro tells the CM whether the data transfer succeeded. Fired after step 18 com
 **ABDM responds:** `202 Accepted`
 
 **After this call completes:**
+
 - `AbdmTransactions` row → `COMPLETED` (success) or `FAILED`
 - Poll with `GET {{base_url}}/abha/transactions?request_id={{transaction_id}}` to confirm
 
@@ -1538,11 +1997,13 @@ Kokoro tells the CM whether the data transfer succeeded. Fired after step 18 com
 ### Monitoring Phase 3
 
 Check status of a specific data flow transaction:
+
 ```
 GET {{base_url}}/abha/transactions?request_id={{transaction_id}}
 ```
 
 Check all pending data-flow requests for a hospital:
+
 ```
 GET {{base_url}}/abha/transactions?hip_id=CITYHOSPITAL01&status=PENDING&limit=20
 ```
@@ -1550,6 +2011,7 @@ GET {{base_url}}/abha/transactions?hip_id=CITYHOSPITAL01&status=PENDING&limit=20
 **`api` field values in AbdmTransactions for Phase 3:** `hi-data-flow`
 
 **Phase 3 transaction lifecycle:**
+
 ```
 PENDING  → acknowledgement sent (step 17), push not yet done
 COMPLETED → pushed (step 18) + CM notified (step 19) successfully
@@ -1557,6 +2019,7 @@ FAILED   → push or notify errored; check callback_payload.error
 ```
 
 **Stuck at PENDING after encryption is implemented?** Check:
+
 1. `hiRequest.dataPushUrl` was reachable from Kokoro's network
 2. HIU's `keyMaterial.keyValue` is a valid Curve25519 base64 public key
 3. The consent artefact was persisted in step 14 (query `ConsentArtefacts` table directly)
@@ -1568,6 +2031,7 @@ FAILED   → push or notify errored; check callback_payload.error
 Kokoro acts as **HIU** on a hospital's behalf: it asks a patient for consent, then pulls that patient's records from **another** HIP. Every call is asynchronous — Kokoro returns a `request_id` and ABDM POSTs results to the registered webhook (`/api/v3/hiu/...`).
 
 **Prerequisites:**
+
 - Phase 0 done (hospital registered via `register-facility`; bridge URL set). Registration now stores `hiu_id` (= `hip_id` in sandbox) so the hospital can act as HIU.
 - `KOKORO_WEBHOOK_BASE_URL` env var **must be set** to Kokoro's public base URL — it is used to build the `dataPushUrl` ABDM hands to the source HIP. Without it, `health-information/request` returns `400`.
 
@@ -1580,6 +2044,63 @@ Kokoro acts as **HIU** on a hospital's behalf: it asks a patient for consent, th
 ### 20. POST `/abha/hiu/consent/request` — 4.3.1 raise a consent request
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `hiu_client.post("/api/hiecm/consent/v3/request/init", {"consent": consent}, hiu_id=hiu_id, request_id=request_id)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/consent/v3/request/init
+X-HIU-ID: <hiu_id resolved from hospital_id>
+REQUEST-ID: <generated request_id returned by this wrapper>
+```
+
+For the wrapper example below, Kokoro constructs this ABDM payload (including the service defaults):
+
+```json
+{
+  "consent": {
+    "hiu": {
+      "id": "<hiu_id resolved from hospital_id>"
+    },
+    "patient": {
+      "id": "john.doe@sbx"
+    },
+    "hiTypes": ["OPConsultation", "DiagnosticReport"],
+    "purpose": {
+      "code": "CAREMGT",
+      "text": "Care Management",
+      "refUri": "www.abdm.gov.in"
+    },
+    "requester": {
+      "name": "Dr. Manju",
+      "identifier": {
+        "type": "REGNO",
+        "value": "MH1001",
+        "system": "https://www.mciindia.org"
+      }
+    },
+    "permission": {
+      "accessMode": "VIEW",
+      "dateRange": {
+        "from": "2024-01-01T00:00:00.000Z",
+        "to": "2025-01-01T00:00:00.000Z"
+      },
+      "dataEraseAt": "2026-01-01T00:00:00.000Z",
+      "frequency": {
+        "unit": "HOUR",
+        "value": 1,
+        "repeats": 0
+      }
+    },
+    "hip": {
+      "id": "OTHERHOSPITAL01"
+    }
+  }
+}
+```
+
+`hospital_id` is not included in the ABDM JSON. It selects `consent.hiu.id` and the `X-HIU-ID` header. If the wrapper omits `hip_id`, Kokoro omits `consent.hip`; if it supplies `care_contexts`, Kokoro adds them as `consent.careContexts` unchanged.
 
 - **Method:** POST · **URL:** `{{base_url}}/abha/hiu/consent/request`
 - **Body (raw JSON):**
@@ -1601,8 +2122,11 @@ Kokoro acts as **HIU** on a hospital's behalf: it asks a patient for consent, th
 **Success (200):**
 
 ```json
-{ "message": "Consent request accepted. consentRequestId will arrive via on-init.",
-  "request_id": "a1b2...", "hospital_id": "hosp-uuid-123" }
+{
+  "message": "Consent request accepted. consentRequestId will arrive via on-init.",
+  "request_id": "a1b2...",
+  "hospital_id": "hosp-uuid-123"
+}
 ```
 
 Optional fields default sensibly: `requester_id_type` (`REGNO`), `requester_id_system` (MCI), `purpose_code` (`CAREMGT`), `access_mode` (`VIEW`), `frequency_*`. `hip_id` and `care_contexts` are optional (omit to let the patient pick).
@@ -1615,11 +2139,15 @@ Optional fields default sensibly: `requester_id_type` (`REGNO`), `requester_id_s
 
 ABDM returns the assigned `consentRequest.id`, correlated by `response.requestId` (the `request_id` from step 20). Kokoro stores it on the `HiuConsentRequests` row. **You don't call this.**
 
+**Outbound ABDM API called by Kokoro:** None. Kokoro only updates its `HiuConsentRequests` row and returns HTTP `202` with `{}`.
+
 ---
 
 ### 22. GET `/abha/hiu/consent/request/{request_id}` — inspect consent state
 
 Returns the row: `status` (`REQUESTED` → `GRANTED`/`DENIED`/`REVOKED`), `consent_request_id` (after step 21), `consent_ids` (after the patient approves, step 23).
+
+**ABDM API called by Kokoro:** None. This wrapper reads **HiuConsentRequests** from DynamoDB only; ABDM receives nothing.
 
 ---
 
@@ -1627,11 +2155,53 @@ Returns the row: `status` (`REQUESTED` → `GRANTED`/`DENIED`/`REVOKED`), `conse
 
 Patient approved / denied / revoked. ABDM sends `notification.consentRequestId`, `status`, and `consentArtefacts: [{ id }]`. Kokoro stores the granted `consentId`(s), then **automatically acknowledges** via 4.3.4 (`/api/hiecm/consent/v3/request/hiu/on-notify`), echoing the callback's REQUEST-ID. **You don't call this.**
 
+**ABDM API automatically called by Kokoro:**
+
+**Service call:** `hiu_client.post("/api/hiecm/consent/v3/request/hiu/on-notify", payload, hiu_id=hiu_id, request_id=<new UUID>)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/consent/v3/request/hiu/on-notify
+X-HIU-ID: <stored hiu_id, or X-HIU-ID from the callback>
+```
+
+```json
+{
+  "acknowledgement": [
+    {
+      "status": "OK",
+      "consentId": "<each consentArtefacts[].id from the callback>"
+    }
+  ],
+  "response": {
+    "requestId": "<REQUEST-ID from this callback>"
+  }
+}
+```
+
+Kokoro sends one `acknowledgement` array entry per received consent artefact. It skips this outbound acknowledgment if `hiu_id`, the callback `REQUEST-ID`, or all consent IDs are missing.
+
 ---
 
 ### 24. POST `/abha/hiu/consent/status` — 4.3.5 poll status _(optional)_
 
 Body: `{ "hospital_id": "...", "consent_request_id": "..." }`. Result arrives at `/api/v3/hiu/consent/request/on-status` (4.3.6) and updates the row.
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `hiu_client.post("/api/hiecm/consent/v3/request/status", {"consentRequestId": consent_request_id}, hiu_id=hiu_id, request_id=<new UUID>)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/consent/v3/request/status
+X-HIU-ID: <hiu_id resolved from hospital_id>
+```
+
+```json
+{
+  "consentRequestId": "<consent_request_id from the wrapper body>"
+}
+```
+
+`hospital_id` is not sent in the JSON body; it is used to resolve `X-HIU-ID`. Kokoro generates a new `REQUEST-ID` header for this call.
 
 ---
 
@@ -1639,11 +2209,65 @@ Body: `{ "hospital_id": "...", "consent_request_id": "..." }`. Result arrives at
 
 Body: `{ "hospital_id": "...", "consent_id": "..." }`. The full artefact + signature arrive at `/api/v3/hiu/consent/on-fetch` (4.3.8) and are stored in `ConsentArtefacts` keyed by `consentId`.
 
+**ABDM API called by Kokoro:**
+
+**Service call:** `hiu_client.post("/api/hiecm/consent/v3/fetch", {"consentId": consent_id}, hiu_id=hiu_id, request_id=<new UUID>)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/consent/v3/fetch
+X-HIU-ID: <hiu_id resolved from hospital_id>
+```
+
+```json
+{
+  "consentId": "<consent_id from the wrapper body>"
+}
+```
+
+`hospital_id` is not sent in the JSON body; it is used to resolve `X-HIU-ID`. Kokoro generates a new `REQUEST-ID` header for this call.
+
 ---
 
 ### 26. POST `/abha/hiu/health-information/request` — request the records
 
 **Auth required:** None
+
+**ABDM API called by Kokoro:**
+
+**Service call:** `hiu_client.post("/api/hiecm/data-flow/v3/health-information/request", payload, hiu_id=hiu_id, request_id=request_id)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/data-flow/v3/health-information/request
+X-HIU-ID: <hiu_id resolved from hospital_id>
+REQUEST-ID: <generated request_id returned by this wrapper>
+```
+
+```json
+{
+  "hiRequest": {
+    "consent": {
+      "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+    },
+    "dateRange": {
+      "from": "2024-01-01T00:00:00.000Z",
+      "to": "2025-01-01T00:00:00.000Z"
+    },
+    "dataPushUrl": "<KOKORO_WEBHOOK_BASE_URL>/api/v3/hiu/health-information/transfer",
+    "keyMaterial": {
+      "cryptoAlg": "ECDH",
+      "curve": "Curve25519",
+      "dhPublicKey": {
+        "expiry": "<generated public-key expiry>",
+        "parameters": "Curve25519/32byte random key",
+        "keyValue": "<Base64 Kokoro ephemeral X25519 public key>"
+      },
+      "nonce": "<Base64 Kokoro nonce>"
+    }
+  }
+}
+```
+
+Kokoro generates `keyMaterial`; the caller cannot supply it. Kokoro persists the matching private key and nonce locally for the later encrypted data push. `hospital_id` only resolves `X-HIU-ID`; it is not sent in the ABDM body.
 
 - **Body (raw JSON):**
 
@@ -1663,6 +2287,7 @@ Body: `{ "hospital_id": "...", "consent_id": "..." }`. The full artefact + signa
 ### 27. POST `/api/v3/hiu/health-information/transfer` ← HIP → Kokoro data push (6.3.5 inbound)
 
 The source HIP pushes encrypted FHIR `entries` + its own `keyMaterial` to our `dataPushUrl`. Kokoro **automatically**:
+
 1. Matches the push to our request by `transactionId` (falls back to the latest `PENDING`).
 2. Decrypts each entry with the stored private key (ECDH → AES-GCM), verifies the SHA-256 checksum.
 3. Persists the decrypted FHIR on the `HiuDataRequests` row (`status → RECEIVED`).
@@ -1672,23 +2297,63 @@ The source HIP pushes encrypted FHIR `entries` + its own `keyMaterial` to our `d
 
 **You don't call this** — the HIP does.
 
+**ABDM API automatically called by Kokoro after processing the push:**
+
+**Service call:** `hiu_client.post("/api/hiecm/data-flow/v3/health-information/notify", payload, hiu_id=hiu_id, request_id=<new UUID>)`
+
+```http
+POST {ABDM_GATEWAY_BASE_URL}/api/hiecm/data-flow/v3/health-information/notify
+X-HIU-ID: <hiu_id saved with the original request>
+```
+
+On successful decryption and persistence, Kokoro sends:
+
+```json
+{
+  "notification": {
+    "consentId": "<consent_id saved with the original request>",
+    "transactionId": "<transactionId from the inbound data push>",
+    "doneAt": "<current UTC time, ISO 8601 with milliseconds>",
+    "notifier": {
+      "type": "HIU",
+      "id": "<hiu_id>"
+    },
+    "statusNotification": {
+      "sessionStatus": "RECEIVED",
+      "hipId": "<hiu_id>",
+      "statusResponses": [
+        {
+          "careContextReference": "<reference from each decrypted entry>",
+          "hiStatus": "OK",
+          "description": ""
+        }
+      ]
+    }
+  }
+}
+```
+
+If decryption or persistence fails, Kokoro calls the same endpoint with `sessionStatus: "FAILED"`, `hiStatus: "ERRORED"`, an empty care-context list (represented by one status object without `careContextReference`), and the error text truncated to 200 characters.
+
 ---
 
 ### 28. GET `/abha/hiu/data/{request_id}` — inspect received data
 
 Returns the `HiuDataRequests` row with decrypted `received_bundles` once `status = RECEIVED`. The ephemeral private key and nonce are **redacted** from this response.
 
+**ABDM API called by Kokoro:** None. This wrapper reads **HiuDataRequests** from DynamoDB only; ABDM receives nothing.
+
 ---
 
 ### HIU callback paths (all auto-routed to ABHALambda via `/api/v3/{proxy+}`)
 
-| Path | Spec | Purpose |
-|------|------|---------|
-| `/api/v3/hiu/consent/request/on-init` | 4.3.2 | consentRequestId assigned |
-| `/api/v3/hiu/consent/request/notify` | — | patient approved/denied/revoked (auto-acked 4.3.4) |
-| `/api/v3/hiu/consent/request/on-status` | 4.3.6 | status poll result |
-| `/api/v3/hiu/consent/on-fetch` | 4.3.8 | artefact delivery |
-| `/api/v3/hiu/health-information/transfer` | 6.3.5 | encrypted record push (decrypt + notify) |
+| Path                                      | Spec  | Purpose                         | Outbound call triggered by Kokoro                        |
+| ----------------------------------------- | ----- | ------------------------------- | -------------------------------------------------------- |
+| `/api/v3/hiu/consent/request/on-init`     | 4.3.2 | consentRequestId assigned       | None; DynamoDB update only                               |
+| `/api/v3/hiu/consent/request/notify`      | —     | patient approved/denied/revoked | `POST /api/hiecm/consent/v3/request/hiu/on-notify`       |
+| `/api/v3/hiu/consent/request/on-status`   | 4.3.6 | status poll result              | None; DynamoDB update only                               |
+| `/api/v3/hiu/consent/on-fetch`            | 4.3.8 | artefact delivery               | None; DynamoDB write only                                |
+| `/api/v3/hiu/health-information/transfer` | 6.3.5 | encrypted record push           | `POST /api/hiecm/data-flow/v3/health-information/notify` |
 
 > **Security caveat (carried from the architecture review):** these HIU callbacks, like the M2 callbacks, do **not yet validate the ABDM gateway JWT**, and the data-push URL is the bridge URL set by an unauthenticated admin endpoint. Add callback JWT validation + consent-signature verification before production onboarding.
 
@@ -1700,20 +2365,20 @@ Returns the `HiuDataRequests` row with decrypted `received_bundles` once `status
 
 Go to **Postman → Environments → Edit** and add:
 
-| Variable          | Example Value               | Set when                                   |
-| ----------------- | --------------------------- | ------------------------------------------ |
-| `base_url`        | `http://localhost:8000`     | Always                                     |
-| `aadhaar`         | `123456789012`              | Before Phase 1A                            |
-| `mobile`          | `9587733170`                | Before Phase 1A                            |
-| `abha_number`     | `12-3456-7890-1234`         | After step 5 (create / login) or 6a (mobile login) |
-| `abha_address`    | `john.doe@abdm`             | After step 6 (profile)                     |
-| `hospital_id`     | `hosp-uuid-123`             | After step 2 (register-facility)           |
-| `hip_id`          | `CITYHOSPITAL01`            | After step 2 (register-facility)           |
-| `bridge_id`       | `SBXID_023051`              | Before step 2 (your ABDM bridge ID)        |
-| `txn_id`          | _(auto-set by test script)_ | Auto from step 4 / 4a                       |
-| `t_token`         | _(auto-set by test script)_ | Auto from step 5a (mobile login, 5 min TTL) |
-| `request_id`      | _(auto-set by test script)_ | Auto from steps 8 and 11                  |
-| `transaction_id`  | _(sent by ABDM)_            | From Phase 3 step 16 callback body         |
+| Variable         | Example Value               | Set when                                           |
+| ---------------- | --------------------------- | -------------------------------------------------- |
+| `base_url`       | `http://localhost:8000`     | Always                                             |
+| `aadhaar`        | `123456789012`              | Before Phase 1A                                    |
+| `mobile`         | `9587733170`                | Before Phase 1A                                    |
+| `abha_number`    | `12-3456-7890-1234`         | After step 5 (create / login) or 6a (mobile login) |
+| `abha_address`   | `john.doe@abdm`             | After step 6 (profile)                             |
+| `hospital_id`    | `hosp-uuid-123`             | After step 2 (register-facility)                   |
+| `hip_id`         | `CITYHOSPITAL01`            | After step 2 (register-facility)                   |
+| `bridge_id`      | `SBXID_023051`              | Before step 2 (your ABDM bridge ID)                |
+| `txn_id`         | _(auto-set by test script)_ | Auto from step 4 / 4a                              |
+| `t_token`        | _(auto-set by test script)_ | Auto from step 5a (mobile login, 5 min TTL)        |
+| `request_id`     | _(auto-set by test script)_ | Auto from steps 8 and 11                           |
+| `transaction_id` | _(sent by ABDM)_            | From Phase 3 step 16 callback body                 |
 
 **No auth headers needed anywhere.** All endpoints are open.
 
@@ -1750,13 +2415,13 @@ pm.environment.set("abha_number", r.accounts[0].ABHANumber); // or let the user 
 
 ---
 
-### Decode ABHA card PDF
+### Decode ABHA card PNG
 
 After step 7 in terminal:
 
 ```bash
-echo 'JVBERi0xLjQK...' | base64 -d > card.pdf
-open card.pdf  # Mac
+echo 'iVBORw0...' | base64 -d > card.png
+open card.png  # Mac
 ```
 
 ---

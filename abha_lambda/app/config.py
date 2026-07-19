@@ -1,7 +1,7 @@
 import os
 import boto3
-# from dotenv import load_dotenv
-# load_dotenv()
+from dotenv import load_dotenv
+load_dotenv()
 
 AWS_REGION = os.environ.get("AWS_REGION", "ap-south-1")
 

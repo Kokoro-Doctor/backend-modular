@@ -14,7 +14,7 @@ Endpoints:
   PATCH /abha/bridge/url               — 3.2.4: admin — register Kokoro webhook URL with ABDM
   POST  /abha/bridge/register-facility — 3.2.5: admin — register hospital facility + HRP bridge
   GET   /abha/bridge/find-bridge       — 3.2.6: live ABDM — find bridge by service ID
-  GET   /abha/bridge/services          — 3.2.7: live ABDM — find services by bridge ID
+  GET   /abha/bridge/services          — 3.2.7: live ABDM — find services under our bridge
   GET   /abha/bridge/hospitals         — admin — list all registered hospitals (from DB)
   GET   /abha/transactions             — admin — inspect ABDM async request/callback log
 """
@@ -65,7 +65,6 @@ class RegisterFacilityRequest(BaseModel):
     hospital_id: str                     # Kokoro internal hospital UUID
     facility_id: str                     # HFR-issued ID e.g. "IN2810014366"
     facility_name: str
-    bridge_id: str                       # Kokoro ABDM bridge ID e.g. "SBX_KOKORO"
     hip_name: str                        # ≤15 chars, alphanumeric — becomes X-HIP-ID
     service_type: str = "HIP"
     active: bool = True
@@ -204,13 +203,13 @@ def register_facility(body: RegisterFacilityRequest):
     Register a hospital facility with ABDM and store the config in DB.
     hip_name becomes the hospital's permanent X-HIP-ID for all future calls.
     Must be ≤15 characters, alphanumeric, unique per bridge per facility.
+    bridge_id is Kokoro's ABDM client ID, taken from config (ABDM_CLIENT_ID).
     """
     try:
         hip_linking_service.register_facility(
             hospital_id=body.hospital_id,
             facility_id=body.facility_id,
             facility_name=body.facility_name,
-            bridge_id=body.bridge_id,
             hip_name=body.hip_name,
             service_type=body.service_type,
             active=body.active,
@@ -252,13 +251,13 @@ def find_bridge_by_service_id(service_id: str):
 # ---------------------------------------------------------------------------
 
 @router.get("/bridge/services")
-def find_services_by_bridge_id(bridge_id: str):
+def find_services_by_bridge_id():
     """
-    Query ABDM live for all services (HIP/HIU) registered under a given bridge ID.
+    Query ABDM live for all services (HIP/HIU) registered under our bridge.
     Returns the raw ABDM response — not from DB.
     """
     try:
-        result = hip_linking_service.find_services_by_bridge_id(bridge_id)
+        result = hip_linking_service.find_services_by_bridge_id()
         return result
     except HTTPException:
         raise
