@@ -20,7 +20,9 @@ def signup_user_from_abha(data: schemas.AbhaSignupRequest):
     """
     Create (or look up) a loginable Kokoro user from an existing ABHA account
     and link them. Identity (phone/name/email) is sourced from the ABHA record;
-    only `abha_number` and `hospital_id` are required in the body.
+    only `abha_number` is required in the body. `hospital_id` is optional — when
+    omitted (e.g. onboarding outside a hospital context) the hospital link is
+    simply skipped and can be established later.
 
     Returns a JWT so the user is immediately logged in. Idempotent — calling
     again with the same `abha_number` returns the same user.

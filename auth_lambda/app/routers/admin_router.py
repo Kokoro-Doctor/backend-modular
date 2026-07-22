@@ -19,13 +19,12 @@ def delete_account(
     x_admin_key: str = Header(..., alias="x-admin-key", description="Internal admin key for authorization")
 ):
     """
-    Internal endpoint to delete a user and/or doctor account by phone number.
+    Internal endpoint to delete user, doctor, and/or hospital account data.
 
-    Deletes ALL related data across every table and S3 prefix. The account is
-    resolved from any surviving trace (the Users/Doctors profile row OR the
-    AuthTable identity record), so it also cleans up partially-deleted accounts
-    whose profile row was already removed by hand. A 404 is returned only when
-    no account and no leftover data exist for the phone number.
+    Send phoneNumber to resolve user/doctor accounts and a hospital whose
+    contact number matches. Send hospital_id for an exact hospital sweep,
+    including a partially-deleted hospital whose profile row is already gone.
+    Both fields may be supplied in one request.
 
     Requires x-admin-key HTTP header for authorization.
     """
@@ -36,31 +35,46 @@ def delete_account(
             raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin key")
 
         try:
-            result = delete_account_by_phone(data.phoneNumber)
+            result = delete_account_by_phone(
+                phone_number=data.phoneNumber,
+                hospital_id=data.hospital_id,
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e))
 
         if not result["account_found"]:
             raise HTTPException(
                 status_code=404,
-                detail=f"No account or related data found for phone number: {result['phone_number']}"
+                detail=(
+                    "No account or related data found for target: "
+                    f"phoneNumber={result['phone_number']!r}, "
+                    f"hospital_id={data.hospital_id!r}"
+                )
             )
 
         types = result["account_types"]
         if types:
-            label = " and ".join(types)
-            message = f"Deleted {label} account and all related data for {result['phone_number']}"
+            label = ", ".join(types)
+            target = result["phone_number"] or result["hospital_id"]
+            message = f"Deleted {label} account data for {target}"
         else:
             # Identity rows were gone but orphaned data remained and was cleaned up.
-            message = f"No profile row found; cleaned up leftover data for {result['phone_number']}"
+            target = result["phone_number"] or result["hospital_id"]
+            message = f"No profile row found; cleaned up leftover data for {target}"
+
+        success = not result["errors"]
+        if not success:
+            message = f"Partial deletion for {target}; retry after resolving reported errors"
 
         return {
-            "success": True,
+            "success": success,
             "phone_number": result["phone_number"],
             "email": result["email"],
             "account_types": types,
             "user_id": result["user_id"],
             "doctor_id": result["doctor_id"],
+            "hospital_id": result["hospital_id"],
+            "hospital_ids": result["hospital_ids"],
             "deleted": result["deleted"],
             "errors": result["errors"],
             "message": message,
@@ -71,4 +85,3 @@ def delete_account(
     except Exception as e:
         logger.error(f"Error deleting account: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-

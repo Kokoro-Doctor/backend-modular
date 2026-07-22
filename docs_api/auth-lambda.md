@@ -274,7 +274,10 @@ POST /auth/session/initiate
 
 ### POST `/auth/admin/delete-account`
 
-Delete user or doctor account (requires `x-admin-key` header).
+Delete user, doctor, or hospital account data (requires `x-admin-key` header).
+Use `phoneNumber` for user/doctor deletion and hospital contact-number lookup,
+or `hospital_id` for an exact hospital cleanup. At least one is required; both
+may be sent together.
 
 **Headers:**
 
@@ -289,5 +292,20 @@ x-admin-key: YOUR_ADMIN_KEY_HERE
   "phoneNumber": "+919587733170"
 }
 ```
+
+Exact hospital deletion (also works when the hospital profile was partially
+deleted or when the hospital signed up without a contact number):
+
+```json
+{
+  "hospital_id": "HOSP_01234567-89ab-cdef-0123-456789abcdef"
+}
+```
+
+Hospital deletion removes the hospital profile, memberships, hospital-assigned
+relations, hospital-uploaded documents and S3 objects, legacy hospital files,
+local ABDM configuration/transactions/consents, and hospital-scoped ABHA link
+tokens. Shared patient and doctor profiles are retained; subscription-backed
+patient-doctor relations are retained with the hospital assignment removed.
 
 ---

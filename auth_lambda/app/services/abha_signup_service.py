@@ -6,7 +6,8 @@ two together. Lives in auth_lambda (not abha_lambda) so it can reuse the
 canonical user-creation path — Users record + AuthTable record + JWT — meaning
 the provisioned user can immediately log in via POST /auth/login.
 
-Input:  { abha_number, hospital_id }   (no phone needed — sourced from ABHA)
+Input:  { abha_number, hospital_id? }  (no phone needed — sourced from ABHA;
+        hospital_id optional — hospital link is skipped when absent)
 Flow:
   1. Read the AbhaAccounts row by abha_number (auth_lambda has the table handle).
   2. Resolve the phone from the ABHA record's `mobile` — this is the login
@@ -22,6 +23,7 @@ Flow:
   6. Return a JWT so the caller is logged in straight away.
 """
 from datetime import datetime, timezone
+from typing import Optional
 
 from fastapi import HTTPException
 
@@ -84,7 +86,7 @@ def _mark_auth_account(normalized_phone: str, user_id: str) -> None:
     )
 
 
-def signup_user_from_abha(abha_number: str, hospital_id: str) -> dict:
+def signup_user_from_abha(abha_number: str, hospital_id: Optional[str] = None) -> dict:
     """
     Provision (or look up) a loginable Kokoro user for the given ABHA account.
 
