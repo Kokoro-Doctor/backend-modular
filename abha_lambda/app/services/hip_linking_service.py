@@ -179,7 +179,9 @@ def generate_link_token(
     if abha_address:
         payload["abhaAddress"] = abha_address
     if abha_number:
-        payload["abhaNumber"] = abha_number
+        # ABDM expects a plain 14-digit string — strip the display dashes
+        # ("91-4118-0337-7265" -> "91411803377265").
+        payload["abhaNumber"] = abha_number.replace("-", "")
 
     # Record the request as PENDING before sending so the callback can correlate.
     abdm_transactions_service.create_pending(
@@ -247,7 +249,8 @@ def link_care_context(
         "patient":     [p.model_dump() for p in patient_records],
     }
     if abha_number:
-        payload["abhaNumber"] = abha_number
+        # ABDM expects a plain 14-digit string — strip the display dashes.
+        payload["abhaNumber"] = abha_number.replace("-", "")
 
     # Record the request as PENDING before sending so the callback can correlate.
     abdm_transactions_service.create_pending(

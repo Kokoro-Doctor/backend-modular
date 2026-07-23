@@ -65,7 +65,7 @@ class AddPatientRequest(BaseModel):
 
 
 class AddPatientForm:
-    """multipart/form-data shape for POST /add-patient (three mandatory documents).
+    """multipart/form-data shape for POST /add-patient (documents are now optional).
 
     Mirrors AddPatientRequest scalar fields plus insurance_policy, hospital_bill,
     prescription file uploads.
@@ -82,9 +82,9 @@ class AddPatientForm:
         age: Optional[int] = Form(None, ge=0, le=150, description="Patient age in years"),
         gender: Optional[str] = Form(None, max_length=64),
         insurer: Optional[str] = Form(None),
-        insurance_policy: UploadFile = File(..., description="Insurance policy document (PDF or image)"),
-        hospital_bill: UploadFile = File(..., description="Hospital bill (PDF or image)"),
-        prescription: UploadFile = File(..., description="Prescription (PDF or image)"),
+        insurance_policy: Optional[UploadFile] = File(None, description="Insurance policy document (PDF or image)"),
+        hospital_bill: Optional[UploadFile] = File(None, description="Hospital bill (PDF or image)"),
+        prescription: Optional[UploadFile] = File(None, description="Prescription (PDF or image)"),
     ):
         self.phone = phone
         self.name = name

@@ -214,10 +214,48 @@ Kokoro transforms your request into the ABDM `MutipleHRPAddUpdateServices` forma
 **Important notes:**
 
 - **Save `hospital_id`** — use it in all Phase 2 linking calls
-- `hip_name` becomes the `X-HIP-ID` header sent to ABDM on every subsequent HIP call
+- `hip_name` is only the `Service-Name` label you chose — **it is not the `X-HIP-ID`**. ABDM assigns its own `serviceId` (e.g. `IN2810014366_3`) for the registration, which is the real value all subsequent HIP calls must send as `X-HIP-ID`
 - `facility_id` must exist in the **HFR sandbox** (`https://facility.abdm.gov.in`) — ABDM validates it in real-time
 - `bridge_id` is taken from `ABDM_CLIENT_ID` in the Lambda's own config — make sure that matches the bridge assigned to your ABDM developer account
-- After registering, verify with step 3 (`find-bridge`) that ABDM reflects the correct data
+- After registering, call step 4 (`GET /abha/bridge/services`) to find the real `serviceId` ABDM assigned, then call **step 2a (`POST /abha/bridge/link-hospital`)** to save it as `hip_id`/`hiu_id` — `register-facility` alone does not store the correct `hip_id`
+
+---
+
+### 2a. POST `/abha/bridge/link-hospital` — Kokoro-only utility, not an ABDM API
+
+**This endpoint has no ABDM milestone number because it isn't part of the ABDM spec** — it's a Kokoro-internal admin utility. It directly writes (or overwrites) `HospitalAbdmConfig` for a `hospital_id`. This makes **no call to ABDM** — it's a plain DynamoDB upsert. Use it to:
+
+- Save the *real* `hip_id`/`hiu_id` (the ABDM `serviceId` from `GET /abha/bridge/services`) after a `register-facility` call, since that call cannot know the assigned serviceId in advance
+- Restore a row after an accidental delete
+- Fix a mistaken `hospital_id` ↔ facility/service mapping — just call again with corrected values, it overwrites cleanly
+
+**Auth required:** None
+
+**Body (raw JSON):**
+
+```json
+{
+  "hospital_id": "hosp-uuid-789",
+  "facility_id": "IN2810014366",
+  "facility_name": "City Hospital",
+  "hip_name": "CITYHOSPITAL01",
+  "hip_id": "IN2810014366_3",
+  "hiu_id": "IN2810014366_3",
+  "abdm_status": "registered"
+}
+```
+
+`hiu_id` is optional — defaults to `hip_id` if omitted (sandbox services usually act as both HIP and HIU under one serviceId).
+
+**Success response (200):**
+
+```json
+{
+  "message": "hospital_id hosp-uuid-789 linked to hip_id IN2810014366_3.",
+  "hospital_id": "hosp-uuid-789",
+  "hip_id": "IN2810014366_3"
+}
+```
 
 ---
 

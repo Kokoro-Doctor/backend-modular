@@ -61,7 +61,7 @@ async def add_patient_endpoint(
     data: AddPatientForm = Depends(),
     token_hospital_id: str = Depends(get_current_hospital),
 ):
-    """Add a patient with 3 mandatory documents (insurance policy, hospital bill, prescription).
+    """Add a patient with optional documents (insurance policy, hospital bill, prescription).
     Documents are stored on S3 and OCR is run asynchronously in the background."""
 
     hospital_id = token_hospital_id

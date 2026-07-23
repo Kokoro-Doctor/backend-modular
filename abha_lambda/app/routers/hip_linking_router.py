@@ -13,6 +13,7 @@ Endpoints:
   POST  /abha/link/care-context        — 4.3.3: link care contexts using stored link token
   PATCH /abha/bridge/url               — 3.2.4: admin — register Kokoro webhook URL with ABDM
   POST  /abha/bridge/register-facility — 3.2.5: admin — register hospital facility + HRP bridge
+  POST  /abha/bridge/link-hospital     — Kokoro-only, not ABDM spec — directly (re)link hospital_id to ABDM config, no ABDM call
   GET   /abha/bridge/find-bridge       — 3.2.6: live ABDM — find bridge by service ID
   GET   /abha/bridge/services          — 3.2.7: live ABDM — find services under our bridge
   GET   /abha/bridge/hospitals         — admin — list all registered hospitals (from DB)
@@ -23,6 +24,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
+from app import config
 from app.abdm.schemas import CareContextPatient
 from app.services import (
     abha_accounts_service,
@@ -65,9 +67,19 @@ class RegisterFacilityRequest(BaseModel):
     hospital_id: str                     # Kokoro internal hospital UUID
     facility_id: str                     # HFR-issued ID e.g. "IN2810014366"
     facility_name: str
-    hip_name: str                        # ≤15 chars, alphanumeric — becomes X-HIP-ID
+    hip_name: str                        # ≤15 chars, alphanumeric — Service-Name, not the ABDM serviceId
     service_type: str = "HIP"
     active: bool = True
+
+
+class LinkHospitalAbdmRequest(BaseModel):
+    hospital_id: str                     # Kokoro internal hospital UUID
+    facility_id: str                     # HFR-issued ID e.g. "IN2810014366"
+    facility_name: str
+    hip_name: str                        # Service-Name shown in ABDM (label only)
+    hip_id: str                          # Real ABDM serviceId used as X-HIP-ID, e.g. "IN2810014366_3"
+    hiu_id: Optional[str] = None         # Defaults to hip_id if not given
+    abdm_status: str = "registered"
 
 
 # ---------------------------------------------------------------------------
@@ -201,9 +213,12 @@ def update_bridge_url(body: UpdateBridgeUrlRequest):
 def register_facility(body: RegisterFacilityRequest):
     """
     Register a hospital facility with ABDM and store the config in DB.
-    hip_name becomes the hospital's permanent X-HIP-ID for all future calls.
-    Must be ≤15 characters, alphanumeric, unique per bridge per facility.
+    hip_name must be ≤15 characters, alphanumeric, unique per bridge per facility.
     bridge_id is Kokoro's ABDM client ID, taken from config (ABDM_CLIENT_ID).
+
+    ABDM assigns its own serviceId (the real X-HIP-ID) separately from hip_name —
+    check GET /abha/bridge/services after this call to find it, then call
+    POST /abha/bridge/link-hospital to save the correct hip_id/hiu_id.
     """
     try:
         hip_linking_service.register_facility(
@@ -215,14 +230,54 @@ def register_facility(body: RegisterFacilityRequest):
             active=body.active,
         )
         return {
-            "message":     f"Facility {body.facility_id} registered successfully.",
+            "message":     f"Facility {body.facility_id} registered successfully. "
+                            "Check GET /abha/bridge/services for the assigned serviceId, "
+                            "then call POST /abha/bridge/link-hospital to save it.",
             "hospital_id": body.hospital_id,
-            "hip_id":      body.hip_name,
+            "hip_name":    body.hip_name,
         }
     except HTTPException:
         raise
     except Exception as e:
         logger.exception("[HIPLinking] register_facility failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Kokoro-only admin utility — NOT part of the ABDM API spec (no ABDM milestone
+# number). Manually (re)links a hospital to its ABDM config with no ABDM call.
+# ---------------------------------------------------------------------------
+
+@router.post("/bridge/link-hospital")
+def link_hospital_abdm(body: LinkHospitalAbdmRequest):
+    """
+    Kokoro-internal utility, not an ABDM API — directly write/overwrite
+    HospitalAbdmConfig for a hospital_id, no ABDM call is made. Use this to
+    fix a mistaken hospital_id/facility mapping, or to restore a row after an
+    accidental delete, when the facility/service is already registered with
+    ABDM (confirmed via GET /abha/bridge/services).
+    Safe to call repeatedly — it's a plain upsert keyed on hospital_id.
+    """
+    try:
+        hospital_abdm_service.save(
+            hospital_id=body.hospital_id,
+            facility_id=body.facility_id,
+            facility_name=body.facility_name,
+            bridge_id=config.ABDM_CLIENT_ID,
+            hip_name=body.hip_name,
+            hip_id=body.hip_id,
+            hiu_id=body.hiu_id or body.hip_id,
+            abdm_status=body.abdm_status,
+        )
+        return {
+            "message":     f"hospital_id {body.hospital_id} linked to hip_id {body.hip_id}.",
+            "hospital_id": body.hospital_id,
+            "hip_id":      body.hip_id,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("[HIPLinking] link_hospital_abdm failed")
         raise HTTPException(status_code=500, detail=str(e))
 
 

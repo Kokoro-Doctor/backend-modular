@@ -1,7 +1,7 @@
 """
 Patient document upload service.
 
-Handles the 3 mandatory documents collected at patient admission:
+Handles documents collected at patient admission (all optional):
   - INSURANCE_POLICY
   - HOSPITAL_BILL
   - PRESCRIPTION
@@ -67,17 +67,17 @@ async def upload_single_doc(
 
 async def upload_patient_docs(
     user_id: str,
-    insurance_policy: UploadFile,
-    hospital_bill: UploadFile,
-    prescription: UploadFile,
+    insurance_policy: UploadFile | None,
+    hospital_bill: UploadFile | None,
+    prescription: UploadFile | None,
     hospital_id: str,
 ) -> list[dict]:
     """
-    Upload all 3 mandatory patient documents and enqueue OCR jobs.
+    Upload patient documents (all optional) and enqueue OCR jobs.
 
     hospital_id is the uploading hospital (from the JWT) — recorded on each doc.
 
-    Returns a list of dicts (one per doc) with keys:
+    Returns a list of dicts (one per doc uploaded) with keys:
       doc_type, document_category (same uppercase value), file_id, s3_original_key
     """
     uploads = [
@@ -88,8 +88,9 @@ async def upload_patient_docs(
 
     results = []
     for doc_type, upload_file in uploads:
-        result = await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
-        results.append(result)
+        if upload_file:
+            result = await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
+            results.append(result)
 
     return results
 
