@@ -28,6 +28,7 @@ from app.config import (
     GROQ_API_KEY,
     GROQ_BASE_URL,
     CLAIM_VALIDATOR_MODEL,
+    CLAIM_REASONING_MODEL,
 )
 from app.logger import get_logger
 from app.services.ocr_service import extract_text_from_image, extract_text_from_pdf_s3
@@ -48,6 +49,9 @@ logger = get_logger(__name__)
 PDF_EXTENSIONS = {"pdf"}
 IMAGE_EXTENSIONS = ALLOWED_EXTENSIONS
 INSURANCE_ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS
+
+MAX_CHARS_PER_DOC = 2000  # keeps requests under TPM limit when
+                           # concatenating multiple documents
 
 
 # ── State Schema ─────────────────────────────────────────────────────
@@ -206,6 +210,8 @@ def multi_doc_extractor(state: ClaimValidationState) -> dict:
     # Build combined doc text with labels
     all_docs_text = ""
     for doc_type, text in ocr_texts.items():
+        if len(text) > MAX_CHARS_PER_DOC:
+            text = text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
         label = doc_type.replace("_", " ").title()
         all_docs_text += f"\n\n--- {label} ---\n{text}\n"
 
@@ -214,6 +220,7 @@ def multi_doc_extractor(state: ClaimValidationState) -> dict:
     try:
         response = client.chat.completions.create(
             model=CLAIM_VALIDATOR_MODEL,
+            reasoning_effort="low",
             messages=[
                 {"role": "system", "content": MULTI_DOC_EXTRACT_SYSTEM},
                 {"role": "user", "content": prompt},
@@ -283,12 +290,12 @@ def claim_form_filler(state: ClaimValidationState) -> dict:
         }
 
     prompt = FORM_FILLER_USER.replace(
-        "<<<EXTRACTED_DATA>>>", json.dumps(extracted, indent=2)
+        "<<<EXTRACTED_DATA>>>", json.dumps(extracted)
     )
 
     try:
         response = client.chat.completions.create(
-            model=CLAIM_VALIDATOR_MODEL,
+            model=CLAIM_REASONING_MODEL,
             messages=[
                 {"role": "system", "content": FORM_FILLER_SYSTEM},
                 {"role": "user", "content": prompt},
@@ -409,7 +416,8 @@ def claim_field_extractor(state: ClaimValidationState) -> dict:
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model=CLAIM_VALIDATOR_MODEL,
+            reasoning_effort="low",
             messages=[
                 {"role": "system", "content": EXTRACTION_SYSTEM},
                 {"role": "user", "content": prompt},
@@ -472,18 +480,20 @@ def cross_doc_analyzer(state: ClaimValidationState) -> dict:
     # Build supporting docs text
     docs_text = ""
     for doc_type, text in supporting.items():
+        if len(text) > MAX_CHARS_PER_DOC:
+            text = text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
         label = doc_type.replace("_", " ").title()
         docs_text += f"\n--- {label} ---\n{text}\n"
 
     prompt = (
         CROSS_DOC_USER
-        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"], indent=2))
+        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"]))
         .replace("<<<SUPPORTING_DOCS>>>", docs_text)
     )
 
     try:
         response = client.chat.completions.create(
-            model=CLAIM_VALIDATOR_MODEL,
+            model=CLAIM_REASONING_MODEL,
             messages=[
                 {"role": "system", "content": CROSS_DOC_SYSTEM},
                 {"role": "user", "content": prompt},
@@ -546,18 +556,18 @@ def claim_auditor(state: ClaimValidationState) -> dict:
         .replace("<<<POLICY_BASELINE>>>", state["policy_baseline"])
         .replace("<<<POLICY_TYPE>>>", state["policy_type"])
         .replace("<<<CROSS_DOC_SECTION>>>", cross_doc_section)
-        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"], indent=2))
+        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"]))
     )
 
     try:
         response = client.chat.completions.create(
-            model=CLAIM_VALIDATOR_MODEL,
+            model=CLAIM_REASONING_MODEL,
             messages=[
                 {"role": "system", "content": AUDITOR_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens=6000,
             response_format={"type": "json_object"},
         )
 
@@ -759,7 +769,8 @@ def report_generator(state: ClaimValidationState) -> dict:
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model=CLAIM_VALIDATOR_MODEL,
+            reasoning_effort="low",
             messages=[
                 {"role": "system", "content": REPORT_SYSTEM},
                 {"role": "user", "content": prompt},

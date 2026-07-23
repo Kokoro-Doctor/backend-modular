@@ -36,7 +36,12 @@ HOSPITAL_API_KEY = os.getenv("HOSPITAL_API_KEY")
 # ── Claim Validator config ──────────────────────────────────────────
 CLAIM_VALIDATOR_MODEL = os.getenv(
     "CLAIM_VALIDATOR_MODEL",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-20b",
+)
+
+CLAIM_REASONING_MODEL = os.getenv(
+    "CLAIM_REASONING_MODEL",
+    "llama-3.3-70b-versatile",
 )
 
 # Default policy baselines when company not detected in form
