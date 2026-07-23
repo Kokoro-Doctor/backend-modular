@@ -25,6 +25,7 @@ from app.config import (
     S3_BUCKET,
     S3_FOLDER_PREFIX,
     s3_client,
+    CLAIM_VALIDATOR_MODEL,
 )
 from app.logger import get_logger
 from app.models.structured_data import StructuredMedicalData
@@ -40,6 +41,8 @@ logger = get_logger(__name__)
 _LOG_TRUNCATE = 1000
 PDF_EXTENSIONS = {"pdf"}
 PRESCRIPTION_ALLOWED_EXTENSIONS = ALLOWED_EXTENSIONS | PDF_EXTENSIONS
+
+MAX_CHARS_PER_DOC = 2000  # keeps requests under gpt-oss-20b's TPM limit
 
 
 def _is_pdf(filename: str) -> bool:
@@ -98,6 +101,10 @@ def extract_structured_data_from_text(
         if not GROQ_API_KEY:
             raise HTTPException(status_code=500, detail="Groq API key not configured")
         client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+
+    if len(ocr_text) > MAX_CHARS_PER_DOC:
+        ocr_text = ocr_text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
+
     extraction_prompt = f"""
         You are a clinical medical data extraction system.
 
@@ -245,9 +252,11 @@ def extract_structured_data_from_text(
     try:
         response = client.chat.completions.create(
             # model="gpt-4o",
-            model="llama-3.3-70b-versatile",
+            model=CLAIM_VALIDATOR_MODEL,
+            reasoning_effort="low",
             messages=messages,
             temperature=0.1,
+            max_tokens=3000,
             response_format={"type": "json_object"},
         )
 
