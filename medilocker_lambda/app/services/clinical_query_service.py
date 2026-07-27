@@ -237,7 +237,7 @@ def answer_clinical_query(
         response = client.chat.completions.create(
             # model="gpt-4o",
             model=CLAIM_REASONING_MODEL,
-            temperature=0.2,
+                                    temperature=0.2,
             max_tokens=4000,
             messages=[
                 {"role": "system", "content": system_prompt},

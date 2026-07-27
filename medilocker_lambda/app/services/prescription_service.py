@@ -125,7 +125,7 @@ def _generate_prescription_from_context(
         response = client.chat.completions.create(
             # model="gpt-4o",
             model=CLAIM_REASONING_MODEL,
-            messages=messages,
+                                    messages=messages,
             temperature=0.3,
             max_tokens=3000,
             response_format={"type": "json_object"},

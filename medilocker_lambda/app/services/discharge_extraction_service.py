@@ -219,8 +219,7 @@ def extract_discharge_structured_data_from_text(
     try:
         response = client.chat.completions.create(
             model=CLAIM_VALIDATOR_MODEL,
-            reasoning_effort="low",
-            messages=messages,
+                        messages=messages,
             temperature=0.1,
             max_tokens=3000,
             response_format={"type": "json_object"},
@@ -318,8 +317,7 @@ def analyze_discharge_summary(
     try:
         response = client.chat.completions.create(
             model=CLAIM_VALIDATOR_MODEL,
-            reasoning_effort="low",
-            messages=messages,
+                        messages=messages,
             temperature=0.1,
             max_tokens=3000,
             response_format={"type": "json_object"},
