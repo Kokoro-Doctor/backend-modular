@@ -15,10 +15,12 @@ handle_health_information_request(): it acknowledges immediately (6.3.4), then
 builds + encrypts the FHIR bundles and pushes them (6.3.5), then tells the CM
 the outcome (6.3.6).
 
-Encryption (app/abdm/data_encryption.py) is still a stub. While it raises
-NotImplementedError, the acknowledgement (6.3.4) still completes and we log
-that the push is pending — we never push placeholder data to a HIU.
+Encryption lives in app/abdm/data_encryption.py, over the Fidelius-compatible
+primitives in app/abdm/fidelius.py. The acknowledgement (6.3.4) is always sent
+before encryption is attempted, so a crypto failure still leaves ABDM with a
+valid ack and us reporting FAILED to the CM — we never push placeholder data.
 """
+import re
 import uuid
 from typing import List, Optional
 
@@ -143,11 +145,17 @@ def notify_data_transfer(
     session_status is one of TRANSFERRED | FAILED; per-careContext hi_status is
     one of DELIVERED | ERRORED (HIP side).
     """
+    # ABDM rejects descriptions containing structural characters (it returned
+    # "Invalid description" when passed a raw JSON error). Keep it to a short,
+    # plain-text summary — strip anything but word chars and basic punctuation.
+    safe_description = re.sub(r"[^\w .,:\-]", " ", description or "")
+    safe_description = re.sub(r"\s+", " ", safe_description).strip()[:100]
+
     status_responses = [
         {
             "careContextReference": ref,
             "hiStatus":             hi_status,
-            "description":          description,
+            "description":          safe_description,
         }
         for ref in care_context_references
     ]

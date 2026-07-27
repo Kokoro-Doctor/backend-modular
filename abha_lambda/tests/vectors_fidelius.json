@@ -1,0 +1,44 @@
+{
+  "source": "fidelius-cli 1.2.0 (backend/tools/fidelius-cli)",
+  "vectors": [
+    {
+      "description": "fidelius-cli-1.2.0 vector 0",
+      "plaintext": "{\"resourceType\":\"Bundle\",\"id\":\"cc-1\",\"entry\":[]}",
+      "senderPrivateKey": "DNNmrzHIyGaHYHyCerymKOWwYqwst6j7C30lVzEIPFc=",
+      "senderPublicKey": "BDt/zGmGCHw9fg0gSoUsFo+6NDSyS2Xz7/KVOUhn0BUmFWMAnSEOZ3T3TBlx/6SvYFsxcg/zsF40o3rPgTBVEEg=",
+      "senderX509PublicKey": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/////////////////////////////////////////7TBEBCAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqYSRShRAQge0Je0Je0Je0Je0Je0Je0Je0Je0Je0Je0JgtenHcQyGQEQQQqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kWiCuGaG4oIa04B7dLHdI0UySPU1+bXxhsinpxaJ+ztPZAiAQAAAAAAAAAAAAAAAAAAAAFN753qL3nNZYEmMaXPXT7QIBCANCAAQ7f8xphgh8PX4NIEqFLBaPujQ0sktl8+/ylTlIZ9AVJhVjAJ0hDmd090wZcf+kr2BbMXIP87BeNKN6z4EwVRBI",
+      "senderNonce": "Vf32+7gcPi3kordai+jEs4hiQB+mdDl1+wzU6j28vLw=",
+      "requesterPrivateKey": "B5z/gwF6RoDdZyHtkOP+xUjlO5O3HXUGYH9AqU3Yuwg=",
+      "requesterPublicKey": "BGhL2Lwr2es5UmQWSloIqeQemLwAwS4zxUk0e2mwUjRyCbEc5LS2/Tm5ibY4aAI2r3pyr8CjpTGDx47kIjRAlXk=",
+      "requesterX509PublicKey": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/////////////////////////////////////////7TBEBCAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqYSRShRAQge0Je0Je0Je0Je0Je0Je0Je0Je0Je0Je0JgtenHcQyGQEQQQqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kWiCuGaG4oIa04B7dLHdI0UySPU1+bXxhsinpxaJ+ztPZAiAQAAAAAAAAAAAAAAAAAAAAFN753qL3nNZYEmMaXPXT7QIBCANCAARoS9i8K9nrOVJkFkpaCKnkHpi8AMEuM8VJNHtpsFI0cgmxHOS0tv05uYm2OGgCNq96cq/Ao6Uxg8eO5CI0QJV5",
+      "requesterNonce": "lP7+aUABxwoBH7RDc6c57pOO5HJJXEI//62qJDq4/yE=",
+      "expectedCiphertext": "iy8EMWvusTedRncdgwsxUIEVK7TxTWaW+DZG/pU+3HSrMp9GgGw7Om2O5UMsR5J7lIKhueKj2n3fYEdhtnQx2A=="
+    },
+    {
+      "description": "fidelius-cli-1.2.0 vector 1",
+      "plaintext": "{\"data\": \"There is no war in Ba Sing Se!\"}",
+      "senderPrivateKey": "A+iHw2IA1SiLSnRIGdOBTBknHKWtYN4FjgwB7sQzJ6g=",
+      "senderPublicKey": "BARUuyPSgcl3OAjKl174GaMg3xXW/h8FhHIYWp9gO9DxWsnlHoKfbkSgTBt0ZxF3V+SbdTNHrEL/xNBepNfSFfU=",
+      "senderX509PublicKey": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/////////////////////////////////////////7TBEBCAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqYSRShRAQge0Je0Je0Je0Je0Je0Je0Je0Je0Je0Je0JgtenHcQyGQEQQQqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kWiCuGaG4oIa04B7dLHdI0UySPU1+bXxhsinpxaJ+ztPZAiAQAAAAAAAAAAAAAAAAAAAAFN753qL3nNZYEmMaXPXT7QIBCANCAAQEVLsj0oHJdzgIypde+BmjIN8V1v4fBYRyGFqfYDvQ8VrJ5R6Cn25EoEwbdGcRd1fkm3UzR6xC/8TQXqTX0hX1",
+      "senderNonce": "SIUd0EA6CTPRuQYwXJYTttpNZOsCDGk2b/MMMvnBnYY=",
+      "requesterPrivateKey": "Cu+fOPQGzQgdlmu/Zpx/fTtosttehpOSUs2xDL2NZFI=",
+      "requesterPublicKey": "BDYUgaSepIm1WQoWDysRaqXq3WZR7htsTr+4n4njXVNDIqe04aVF/b+LhwPUcIaC7+zENa3qKFg2zqcxrkre6pk=",
+      "requesterX509PublicKey": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/////////////////////////////////////////7TBEBCAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqYSRShRAQge0Je0Je0Je0Je0Je0Je0Je0Je0Je0Je0JgtenHcQyGQEQQQqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kWiCuGaG4oIa04B7dLHdI0UySPU1+bXxhsinpxaJ+ztPZAiAQAAAAAAAAAAAAAAAAAAAAFN753qL3nNZYEmMaXPXT7QIBCANCAAQ2FIGknqSJtVkKFg8rEWql6t1mUe4bbE6/uJ+J411TQyKntOGlRf2/i4cD1HCGgu/sxDWt6ihYNs6nMa5K3uqZ",
+      "requesterNonce": "2kGeLxJQJwlwJf7XnN/Pp6+03G310XhZJ+txZ84EUMY=",
+      "expectedCiphertext": "mgDDMuwi+kfe01rlurH3XfrFRtPobvjiQr9a9bxgqC8vHQsZDGsgu7osrKAMVUyjJo7FyaMmeJ0ZTQ=="
+    },
+    {
+      "description": "fidelius-cli-1.2.0 vector 2",
+      "plaintext": "{\"resourceType\":\"Bundle\",\"note\":\"unicode: \u00e0\u00e9\u00ee\u00f5\u00fc \u0928\u092e\u0938\u094d\u0924\u0947\"}",
+      "senderPrivateKey": "AyOSPcx4ANQUH0rGxSHO9ynCUDs5eBCp+rACuCoxgT0=",
+      "senderPublicKey": "BHYybC8t1AGKTq0XVOqNtb6rJzWbbaKD0hAyqhfN7Bf2O4p/S9In02gXTf/+b2N6L3YMD1/+WFqSd/GXtolrj9s=",
+      "senderX509PublicKey": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/////////////////////////////////////////7TBEBCAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqYSRShRAQge0Je0Je0Je0Je0Je0Je0Je0Je0Je0Je0JgtenHcQyGQEQQQqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kWiCuGaG4oIa04B7dLHdI0UySPU1+bXxhsinpxaJ+ztPZAiAQAAAAAAAAAAAAAAAAAAAAFN753qL3nNZYEmMaXPXT7QIBCANCAAR2MmwvLdQBik6tF1TqjbW+qyc1m22ig9IQMqoXzewX9juKf0vSJ9NoF03//m9jei92DA9f/lhaknfxl7aJa4/b",
+      "senderNonce": "tT+EwhKT+BuUxOY80wryamtV9tqxZ71Uu9XL/Nok7Uw=",
+      "requesterPrivateKey": "DTFH67Jv5hGfnNlpzXzrg/P7CuBipKw7rZCjGTHI+hk=",
+      "requesterPublicKey": "BHw4/k1+TZe2rnq2xB2K22KD4SvAuSIsZGN0nNSKBDznDTbO3sYrG0U86yzTxe7Db4T9yY53Eli9unlySC7Bz0w=",
+      "requesterX509PublicKey": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/////////////////////////////////////////7TBEBCAqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqYSRShRAQge0Je0Je0Je0Je0Je0Je0Je0Je0Je0Je0JgtenHcQyGQEQQQqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq0kWiCuGaG4oIa04B7dLHdI0UySPU1+bXxhsinpxaJ+ztPZAiAQAAAAAAAAAAAAAAAAAAAAFN753qL3nNZYEmMaXPXT7QIBCANCAAR8OP5Nfk2Xtq56tsQdittig+ErwLkiLGRjdJzUigQ85w02zt7GKxtFPOss08Xuw2+E/cmOdxJYvbp5ckguwc9M",
+      "requesterNonce": "tD+rUDi5IPNymmBML80B8VH9XFbNbBjNTa8zL+B2LhA=",
+      "expectedCiphertext": "/wWfhKp3nR6ndlBJAyfEvM0HAC4lUfCSsRhM3atqCNAtQYEc7ckglhARvXXnN+xXi4Vo9E5S7K87HDChU9i8WmjXCCq4dyZ/IVrrxocC4JHsL4n2OCpBc54="
+    }
+  ]
+}

@@ -16,6 +16,7 @@ import uuid
 from typing import List, Optional
 
 from app import config
+from app.utils.abha_number import to_abdm_digits
 from app.abdm import hip_client
 from app.abdm.schemas import CareContextPatient
 from app.services import hospital_abdm_service, abdm_transactions_service
@@ -179,9 +180,8 @@ def generate_link_token(
     if abha_address:
         payload["abhaAddress"] = abha_address
     if abha_number:
-        # ABDM expects a plain 14-digit string — strip the display dashes
-        # ("91-4118-0337-7265" -> "91411803377265").
-        payload["abhaNumber"] = abha_number.replace("-", "")
+        # ABDM link APIs want the bare 14-digit form, not the dashed display form.
+        payload["abhaNumber"] = to_abdm_digits(abha_number)
 
     # Record the request as PENDING before sending so the callback can correlate.
     abdm_transactions_service.create_pending(
@@ -222,7 +222,6 @@ def link_care_context(
     abha_address: str,
     patient_records: List[CareContextPatient],
     link_token: str,
-    abha_number: Optional[str] = None,
 ) -> str:
     """
     Link one or more care contexts against the patient's ABHA address.
@@ -232,6 +231,12 @@ def link_care_context(
 
     A PENDING row is recorded in AbdmTransactions (keyed by the REQUEST-ID we
     send) so the 4.3.4 callback can be correlated. The request_id is returned.
+
+    The patient is identified by abhaAddress only — the same identity the link
+    token was minted against in 4.3.1. We deliberately do NOT send abhaNumber:
+    the link token is address-scoped, and adding an abhaNumber ABDM considers
+    inconsistent triggers "ABHA number mismatch with Link token". abha_number is
+    still used upstream (in the router) as the DB key to fetch the link token.
 
     link_token is passed as X-LINK-TOKEN header by hip_client.post().
     """
@@ -248,9 +253,6 @@ def link_care_context(
         "abhaAddress": abha_address,
         "patient":     [p.model_dump() for p in patient_records],
     }
-    if abha_number:
-        # ABDM expects a plain 14-digit string — strip the display dashes.
-        payload["abhaNumber"] = abha_number.replace("-", "")
 
     # Record the request as PENDING before sending so the callback can correlate.
     abdm_transactions_service.create_pending(

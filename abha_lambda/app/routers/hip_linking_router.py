@@ -140,12 +140,11 @@ def link_care_context(body: LinkCareContextRequest):
     hospital = hospital_abdm_service.get_or_raise(body.hospital_id)
     hip_id   = hospital["hip_id"]
 
-    # Resolve abha_number to look up the stored link token
-    abha_number = body.abha_number
-    if not abha_number:
-        record = abha_accounts_service.get_by_abha_address(body.abha_address)
-        if record:
-            abha_number = record.get("abha_number")
+    # Resolve abha_number from abha_address (the canonical DB key format, e.g.
+    # with dashes) rather than trusting body.abha_number verbatim — a
+    # differently-formatted abha_number would silently miss the DB lookup.
+    record = abha_accounts_service.get_by_abha_address(body.abha_address)
+    abha_number = record.get("abha_number") if record else body.abha_number
 
     if not abha_number:
         raise HTTPException(
@@ -164,12 +163,13 @@ def link_care_context(body: LinkCareContextRequest):
         )
 
     try:
+        # abha_number is resolved above only to look up the stored link token;
+        # it is intentionally not sent to ABDM (the link token is address-scoped).
         request_id = hip_linking_service.link_care_context(
             hospital_id=body.hospital_id,
             abha_address=body.abha_address,
             patient_records=body.patient,
             link_token=link_token,
-            abha_number=abha_number,
         )
         return {
             "message":      "Care context linking request accepted.",

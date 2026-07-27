@@ -4,8 +4,8 @@ HIU data-flow business logic (Milestone 3) — Kokoro requesting + receiving rec
 Flow:
   request   (us → ABDM)  request_health_information()
               POST /api/hiecm/data-flow/v3/health-information/request
-              We generate an ephemeral X25519 key pair, hand ABDM our public key
-              + the dataPushUrl, and persist the PRIVATE key so we can decrypt.
+              We generate an ephemeral curve25519 key pair, hand ABDM our public
+              key + the dataPushUrl, and persist the PRIVATE key so we can decrypt.
   push      (HIP → us)   handle_data_transfer()  ← our dataPushUrl
               Decrypt entries with the stored private key, persist the FHIR, then
   notify    (us → ABDM)  notify CM the transfer was RECEIVED (6.3.6).

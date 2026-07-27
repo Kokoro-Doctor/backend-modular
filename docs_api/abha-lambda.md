@@ -1516,12 +1516,11 @@ REQUEST-ID: <generated request_id returned by this wrapper>
       "hiType": "OPConsultation",
       "count": 2
     }
-  ],
-  "abhaNumber": "12-3456-7890-1234"
+  ]
 }
 ```
 
-`hospital_id` is used only to resolve `X-HIP-ID` and the hospital-scoped `X-LINK-TOKEN`; it is not included in the ABDM body. `patient` is serialized from the validated wrapper request. `abhaNumber` is included whenever Kokoro resolves or receives it.
+`hospital_id` is used only to resolve `X-HIP-ID` and the hospital-scoped `X-LINK-TOKEN`; it is not included in the ABDM body. `patient` is serialized from the validated wrapper request. **`abhaNumber` is deliberately NOT sent** — the link token from step 8 is scoped to the `abhaAddress`, so the patient is identified by `abhaAddress` only. Sending an `abhaNumber` ABDM considers inconsistent with the token returns `ABDM-9999: ABHA number mismatch with Link token`. (`abha_number` in the wrapper body is used only internally to fetch the stored link token.)
 
 **Postman setup:**
 

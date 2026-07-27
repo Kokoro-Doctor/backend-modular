@@ -4,11 +4,28 @@ from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
 
 from app.routers import abha_router, hip_linking_router, webhook_router, hiu_router
-from app.logger import get_logger
+from app.logger import get_logger, set_log_source
 
 logger = get_logger(__name__)
 
 app = FastAPI(title="ABHA Service")
+
+
+@app.middleware("http")
+async def tag_log_source(request: Request, call_next):
+    """
+    Tag every log line for this request with its origin so ABDM webhook logs
+    and our own trigger logs can be separated in CloudWatch.
+
+    Our own endpoints live under /abha (abha, hip-linking, hiu routers); the
+    inbound ABDM callbacks live under /api/v3 (webhook router, paths fixed by
+    the ABDM spec). Only /api/v3 paths are tagged as ABDM webhooks — everything
+    else (our /abha endpoints, /docs, health checks) counts as internal.
+    """
+    path = request.url.path
+    source = "abdm_webhook" if path.startswith("/api/v3") else "internal"
+    set_log_source(source)
+    return await call_next(request)
 
 app.add_middleware(
     CORSMiddleware,

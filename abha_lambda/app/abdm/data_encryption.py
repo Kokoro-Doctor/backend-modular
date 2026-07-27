@@ -1,5 +1,5 @@
 """
-ABDM Data-Flow encryption (Section 6.3.5) — real ECDH (Curve25519) + AES-GCM.
+ABDM Data-Flow encryption (Section 6.3.5) — the ABDM protocol adapter.
 
 This module is symmetric and serves BOTH directions:
 
@@ -9,45 +9,23 @@ This module is symmetric and serves BOTH directions:
     pushed them encrypted against OUR public key; we decrypt with our stored
     ephemeral private key.
 
-Scheme (per the ABDM Data-Sharing spec / Kokoro WASA audit §C-3)
-────────────────────────────────────────────────────────────────
-  1. Each party generates an ephemeral X25519 key pair + a 32-byte nonce.
-  2. shared = ECDH(our_private, their_public)
-  3. salt   = our_nonce XOR their_nonce
-  4. okm    = HKDF-SHA256(shared, salt, info=b"", length=44)
-             aes_key = okm[:32]   (AES-256)
-             iv      = okm[32:44] (96-bit GCM nonce)
-  5. AES-256-GCM encrypt/decrypt each FHIR bundle.
-  6. checksum = SHA-256(plaintext) hex.
+All cryptography lives in app/abdm/fidelius.py, which is a validated port of
+ABDM's reference implementation (Fidelius CLI). This module only maps between
+that primitive and ABDM's payload shapes — keyMaterial, entries, checksums.
+Keep it that way: fidelius.py must stay free of ABDM protocol structures so it
+can be diffed directly against the CLI in tests/test_fidelius.py.
 
-Because both sides derive the same (aes_key, iv) from the XORed nonces, the
-receiver reproduces the key without any extra exchange.
-
-SECURITY CAVEAT: a single (aes_key, iv) is reused across all entries in one
-push session — this mirrors ABDM's reference scheme for sandbox interop. It is
-safe only because the ephemeral key+nonce are fresh per session. Prefer one
-care-context per push, or move to per-entry IVs if/when ABDM supports it.
+SECURITY CAVEAT: the scheme derives a single (aes_key, iv) per session from the
+XORed nonces, so that pair is reused across every entry in one push. This is
+ABDM's design, not ours — it is safe only because the key pair and nonce are
+freshly generated per session. Never reuse a key material across sessions.
 """
 import base64
 import hashlib
-import os
 from datetime import datetime, timezone, timedelta
 from typing import List, Tuple
 
-from cryptography.hazmat.primitives.asymmetric.x25519 import (
-    X25519PrivateKey,
-    X25519PublicKey,
-)
-from cryptography.hazmat.primitives.kdf.hkdf import HKDF
-from cryptography.hazmat.primitives.hashes import SHA256
-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    PublicFormat,
-    PrivateFormat,
-    NoEncryption,
-)
-
+from app.abdm import fidelius
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -55,7 +33,6 @@ logger = get_logger(__name__)
 CRYPTO_ALG = "ECDH"
 CURVE = "Curve25519"
 PARAMETERS = "Curve25519/32byte random key"
-_HKDF_LEN = 44  # 32-byte AES key + 12-byte GCM IV
 
 
 # ---------------------------------------------------------------------------
@@ -64,18 +41,18 @@ _HKDF_LEN = 44  # 32-byte AES key + 12-byte GCM IV
 
 def generate_key_material() -> Tuple[str, str, dict]:
     """
-    Generate one ephemeral X25519 key pair + nonce for a single data session.
+    Generate one ephemeral key pair + nonce for a single data session.
 
     Returns:
         (private_key_b64, nonce_b64, key_material) where key_material is the
         ABDM `keyMaterial` dict to hand to the counterparty. The caller MUST
         persist private_key_b64 + nonce_b64 if it needs to decrypt later
         (HIU flow); for the HIP encrypt flow they are used immediately.
+
+    `keyValue` is the 65-byte uncompressed EC point (88 base64 chars) that
+    ABDM's BouncyCastle stack expects — see the OID note in fidelius.py.
     """
-    private_key = X25519PrivateKey.generate()
-    private_raw = private_key.private_bytes(Encoding.Raw, PrivateFormat.Raw, NoEncryption())
-    public_raw = private_key.public_key().public_bytes(Encoding.Raw, PublicFormat.Raw)
-    nonce = os.urandom(32)
+    material = fidelius.generate_key_material()
 
     key_material = {
         "cryptoAlg": CRYPTO_ALG,
@@ -83,34 +60,23 @@ def generate_key_material() -> Tuple[str, str, dict]:
         "dhPublicKey": {
             "expiry": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
             "parameters": PARAMETERS,
-            "keyValue": base64.b64encode(public_raw).decode(),
+            "keyValue": material["publicKey"],
         },
-        "nonce": base64.b64encode(nonce).decode(),
+        "nonce": material["nonce"],
     }
-    return (
-        base64.b64encode(private_raw).decode(),
-        base64.b64encode(nonce).decode(),
-        key_material,
-    )
+    return material["privateKey"], material["nonce"], key_material
 
 
-def _derive_key_iv(
-    private_key_b64: str,
-    peer_public_key_b64: str,
-    our_nonce_b64: str,
-    peer_nonce_b64: str,
-) -> Tuple[bytes, bytes]:
-    """Reproduce the shared (aes_key, iv) from our private key + the peer's public key."""
-    private_key = X25519PrivateKey.from_private_bytes(base64.b64decode(private_key_b64))
-    peer_public = X25519PublicKey.from_public_bytes(base64.b64decode(peer_public_key_b64))
-    shared = private_key.exchange(peer_public)
-
-    our_nonce = base64.b64decode(our_nonce_b64)
-    peer_nonce = base64.b64decode(peer_nonce_b64)
-    salt = bytes(a ^ b for a, b in zip(our_nonce, peer_nonce))
-
-    okm = HKDF(algorithm=SHA256(), length=_HKDF_LEN, salt=salt, info=b"").derive(shared)
-    return okm[:32], okm[32:_HKDF_LEN]
+def _peer(key_material: dict) -> Tuple[str, str]:
+    """Pull (public_key_b64, nonce_b64) out of a counterparty's keyMaterial."""
+    try:
+        public_key = key_material["dhPublicKey"]["keyValue"]
+        nonce = key_material["nonce"]
+    except (KeyError, TypeError) as exc:
+        raise ValueError(f"malformed ABDM keyMaterial: {exc}") from exc
+    if not public_key or not nonce:
+        raise ValueError("ABDM keyMaterial is missing dhPublicKey.keyValue or nonce")
+    return public_key, nonce
 
 
 # ---------------------------------------------------------------------------
@@ -132,25 +98,27 @@ def encrypt_care_context_bundles(
         (entries, sender_key_material) — entries ready for the data push and the
         HIP's own keyMaterial so the HIU can derive the same secret.
     """
+    hiu_public_key, hiu_nonce = _peer(hiu_key_material)
     private_key_b64, nonce_b64, sender_key_material = generate_key_material()
-    aes_key, iv = _derive_key_iv(
-        private_key_b64,
-        hiu_key_material["dhPublicKey"]["keyValue"],
-        nonce_b64,
-        hiu_key_material["nonce"],
-    )
-    aes = AESGCM(aes_key)
 
     entries = []
     for ref, fhir_json in bundles:
-        plaintext = fhir_json.encode("utf-8")
-        ciphertext = aes.encrypt(iv, plaintext, None)
         entries.append({
-            "content": base64.b64encode(ciphertext).decode(),
+            "content": fidelius.encrypt(
+                fhir_json,
+                sender_nonce_b64=nonce_b64,
+                requester_nonce_b64=hiu_nonce,
+                sender_private_key_b64=private_key_b64,
+                requester_public_key_b64=hiu_public_key,
+            ),
             "media": "application/fhir+json",
-            "checksum": hashlib.sha256(plaintext).hexdigest(),
+            # ABDM does not pin a digest for entries[].checksum; keeping the
+            # SHA-256 this module has always sent. If a HIU ever rejects it,
+            # MD5 hex is the other encoding seen in the wild.
+            "checksum": hashlib.sha256(fhir_json.encode("utf-8")).hexdigest(),
             "careContextReference": ref,
         })
+
     logger.info("[DataEncryption] Encrypted %d bundle(s) for push", len(entries))
     return entries, sender_key_material
 
@@ -177,19 +145,19 @@ def decrypt_entries(
     Returns:
         list of {careContextReference, fhir (plaintext JSON), checksum_ok}.
     """
-    aes_key, iv = _derive_key_iv(
-        receiver_private_key_b64,
-        hip_key_material["dhPublicKey"]["keyValue"],
-        receiver_nonce_b64,
-        hip_key_material["nonce"],
-    )
-    aes = AESGCM(aes_key)
+    hip_public_key, hip_nonce = _peer(hip_key_material)
 
     decrypted = []
     for entry in entries:
-        ciphertext = base64.b64decode(entry["content"])
-        plaintext = aes.decrypt(iv, ciphertext, None)
-        checksum_ok = hashlib.sha256(plaintext).hexdigest() == entry.get("checksum")
+        plaintext = fidelius.decrypt(
+            entry["content"],
+            requester_nonce_b64=receiver_nonce_b64,
+            sender_nonce_b64=hip_nonce,
+            requester_private_key_b64=receiver_private_key_b64,
+            sender_public_key_b64=hip_public_key,
+        )
+        checksum = entry.get("checksum")
+        checksum_ok = _checksum_matches(plaintext, checksum)
         if not checksum_ok:
             logger.warning(
                 "[DataEncryption] checksum mismatch for careContext=%s",
@@ -197,8 +165,28 @@ def decrypt_entries(
             )
         decrypted.append({
             "careContextReference": entry.get("careContextReference"),
-            "fhir": plaintext.decode("utf-8"),
+            "fhir": plaintext,
             "checksum_ok": checksum_ok,
         })
+
     logger.info("[DataEncryption] Decrypted %d entrie(s)", len(decrypted))
     return decrypted
+
+
+def _checksum_matches(plaintext: str, checksum) -> bool:
+    """
+    Verify a HIP's entry checksum.
+
+    ABDM does not pin the digest, and implementations differ (the spec's own
+    samples use MD5). Accept the common ones rather than flagging a spurious
+    mismatch. A missing checksum is reported as not-verified, never as a match.
+    """
+    if not checksum:
+        return False
+    raw = plaintext.encode("utf-8")
+    candidates = {
+        hashlib.md5(raw).hexdigest(),
+        hashlib.sha256(raw).hexdigest(),
+        base64.b64encode(hashlib.md5(raw).digest()).decode(),
+    }
+    return str(checksum).strip().lower() in {c.lower() for c in candidates}
