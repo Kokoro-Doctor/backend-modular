@@ -28,12 +28,14 @@ from app.config import (
     GROQ_API_KEY,
     GROQ_BASE_URL,
     CLAIM_VALIDATOR_MODEL,
+    CLAIM_REASONING_MODEL,
 )
 from app.logger import get_logger
 from app.services.ocr_service import extract_text_from_image, extract_text_from_pdf_s3
 from app.services.policy_router import detect_policy_baseline
 from app.services.financial_calculator import calculate_deduction_risk
 from app.services.icd_lookup import lookup_icd_code
+from app.services.cghs_rate_reference import estimate_procedure_costs, find_procedure_in_text
 from app.services.prompts.claim_prompts import (
     EXTRACTION_SYSTEM, EXTRACTION_USER,
     CROSS_DOC_SYSTEM, CROSS_DOC_USER,
@@ -48,6 +50,9 @@ logger = get_logger(__name__)
 PDF_EXTENSIONS = {"pdf"}
 IMAGE_EXTENSIONS = ALLOWED_EXTENSIONS
 INSURANCE_ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS
+
+MAX_CHARS_PER_DOC = 2000  # keeps requests under TPM limit when
+                           # concatenating multiple documents
 
 
 # ── State Schema ─────────────────────────────────────────────────────
@@ -206,6 +211,8 @@ def multi_doc_extractor(state: ClaimValidationState) -> dict:
     # Build combined doc text with labels
     all_docs_text = ""
     for doc_type, text in ocr_texts.items():
+        if len(text) > MAX_CHARS_PER_DOC:
+            text = text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
         label = doc_type.replace("_", " ").title()
         all_docs_text += f"\n\n--- {label} ---\n{text}\n"
 
@@ -214,7 +221,7 @@ def multi_doc_extractor(state: ClaimValidationState) -> dict:
     try:
         response = client.chat.completions.create(
             model=CLAIM_VALIDATOR_MODEL,
-            messages=[
+                        messages=[
                 {"role": "system", "content": MULTI_DOC_EXTRACT_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
@@ -283,13 +290,13 @@ def claim_form_filler(state: ClaimValidationState) -> dict:
         }
 
     prompt = FORM_FILLER_USER.replace(
-        "<<<EXTRACTED_DATA>>>", json.dumps(extracted, indent=2)
+        "<<<EXTRACTED_DATA>>>", json.dumps(extracted)
     )
 
     try:
         response = client.chat.completions.create(
-            model=CLAIM_VALIDATOR_MODEL,
-            messages=[
+            model=CLAIM_REASONING_MODEL,
+                                    messages=[
                 {"role": "system", "content": FORM_FILLER_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
@@ -338,6 +345,76 @@ def claim_form_filler(state: ClaimValidationState) -> dict:
 
         except Exception as e:
             logger.warning(f"[CLAIM_GRAPH] Autofill ICD lookup failed (non-fatal): {e}")
+
+        # ── Deterministic CGHS-reference cost estimate for cashless section ──
+        # Only fills fields that are still missing after extraction — never
+        # overwrites a real extracted value. Rule-based (rapidfuzz match
+        # against a published CGHS rate card), no LLM involvement, matching
+        # the same determinism-first pattern used by icd_lookup.py and
+        # financial_calculator.py elsewhere in this pipeline.
+        try:
+            part_c = form_data.get("part_c_cashless_request") or {}
+            charge_fields = (
+                "room_rent_per_day", "icu_charges", "ot_charges",
+                "surgeon_anesthesia_fees", "medicines_consumables",
+                "investigation_cost", "total_expected_cost",
+            )
+            missing_charge_fields = [f for f in charge_fields if not part_c.get(f)]
+
+            if missing_charge_fields:
+                diag_info = extracted.get("diagnosis_and_procedures", {}) or {}
+                admission_info = extracted.get("admission_details", {}) or {}
+                procedure_name = diag_info.get("procedure_1") or diag_info.get("primary_diagnosis")
+
+                estimate = estimate_procedure_costs(
+                    procedure_name,
+                    expected_days_stay=admission_info.get("expected_days_stay"),
+                    days_in_icu=admission_info.get("days_in_icu"),
+                )
+
+                # Fallback: structured extraction gave no confident match.
+                # Scan the raw prescription OCR text directly — deterministic,
+                # no LLM involvement — in case a procedure name is mentioned
+                # there but wasn't captured into a structured field.
+                if not estimate:
+                    ocr_texts = state.get("ocr_texts", {}) or {}
+                    prescription_text = ocr_texts.get("doctor_prescription") or ocr_texts.get("prescription") or ""
+                    found_procedure = find_procedure_in_text(prescription_text)
+                    if found_procedure:
+                        estimate = estimate_procedure_costs(
+                            found_procedure,
+                            expected_days_stay=admission_info.get("expected_days_stay"),
+                            days_in_icu=admission_info.get("days_in_icu"),
+                        )
+
+                if estimate:
+                    if not part_c.get("room_rent_per_day"):
+                        part_c["room_rent_per_day"] = estimate["room_rent_per_day"]
+                    if not part_c.get("icu_charges"):
+                        part_c["icu_charges"] = estimate["icu_charges"]
+                    if not part_c.get("ot_charges"):
+                        part_c["ot_charges"] = estimate["ot_charges"]
+                    if not part_c.get("surgeon_anesthesia_fees"):
+                        part_c["surgeon_anesthesia_fees"] = estimate["professional_fees"]
+                    if not part_c.get("medicines_consumables"):
+                        part_c["medicines_consumables"] = estimate["medicines_consumables"]
+                    if not part_c.get("investigation_cost"):
+                        part_c["investigation_cost"] = estimate["investigation_cost"]
+                    if not part_c.get("total_expected_cost"):
+                        part_c["total_expected_cost"] = estimate["total_expected_cost"]
+
+                    form_data["part_c_cashless_request"] = part_c
+
+                    # Internal backend log only — not attached to form_data,
+                    # never reaches the API response or the rendered form.
+                    logger.info(
+                        f"[CLAIM_GRAPH] CGHS cost estimate applied (internal): "
+                        f"matched='{estimate['matched_procedure']}' "
+                        f"confidence={estimate['match_confidence']:.0%} "
+                        f"total=₹{estimate['total_expected_cost']}"
+                    )
+        except Exception as e:
+            logger.warning(f"[CLAIM_GRAPH] CGHS cost estimate failed (non-fatal): {e}")
 
         # Calculate claimable amount from billing data
         billing = extracted.get("billing_details", {}) or {}
@@ -409,8 +486,8 @@ def claim_field_extractor(state: ClaimValidationState) -> dict:
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
+            model=CLAIM_VALIDATOR_MODEL,
+                        messages=[
                 {"role": "system", "content": EXTRACTION_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
@@ -472,19 +549,21 @@ def cross_doc_analyzer(state: ClaimValidationState) -> dict:
     # Build supporting docs text
     docs_text = ""
     for doc_type, text in supporting.items():
+        if len(text) > MAX_CHARS_PER_DOC:
+            text = text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
         label = doc_type.replace("_", " ").title()
         docs_text += f"\n--- {label} ---\n{text}\n"
 
     prompt = (
         CROSS_DOC_USER
-        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"], indent=2))
+        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"]))
         .replace("<<<SUPPORTING_DOCS>>>", docs_text)
     )
 
     try:
         response = client.chat.completions.create(
-            model=CLAIM_VALIDATOR_MODEL,
-            messages=[
+            model=CLAIM_REASONING_MODEL,
+                                    messages=[
                 {"role": "system", "content": CROSS_DOC_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
@@ -546,18 +625,18 @@ def claim_auditor(state: ClaimValidationState) -> dict:
         .replace("<<<POLICY_BASELINE>>>", state["policy_baseline"])
         .replace("<<<POLICY_TYPE>>>", state["policy_type"])
         .replace("<<<CROSS_DOC_SECTION>>>", cross_doc_section)
-        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"], indent=2))
+        .replace("<<<STRUCTURED_DATA>>>", json.dumps(state["structured_data"]))
     )
 
     try:
         response = client.chat.completions.create(
-            model=CLAIM_VALIDATOR_MODEL,
-            messages=[
+            model=CLAIM_REASONING_MODEL,
+                                    messages=[
                 {"role": "system", "content": AUDITOR_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=8192,
+            max_tokens=6000,
             response_format={"type": "json_object"},
         )
 
@@ -759,8 +838,8 @@ def report_generator(state: ClaimValidationState) -> dict:
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[
+            model=CLAIM_VALIDATOR_MODEL,
+                        messages=[
                 {"role": "system", "content": REPORT_SYSTEM},
                 {"role": "user", "content": prompt},
             ],

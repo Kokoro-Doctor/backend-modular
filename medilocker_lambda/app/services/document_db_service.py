@@ -72,6 +72,11 @@ def create_document_record(document_data: Dict[str, Any]) -> Dict[str, Any]:
         "file_metadata": document_data.get("file_metadata"),
         # upload_mode: "LIVE" (default) or "ASYNC" for background OCR jobs
         "upload_mode": document_data.get("upload_mode", "LIVE"),
+        # source: who added the document — "USER" (patient) or "HOSPITAL".
+        # hospital_id is set ONLY for source=HOSPITAL; user docs omit it so the
+        # sparse hospital-index never contains a patient's self-uploads.
+        "source": document_data.get("source", "USER"),
+        "hospital_id": document_data.get("hospital_id"),
         "updated_at": now_iso,
     }
 
@@ -333,6 +338,83 @@ def get_documents_for_user(
         return items
     except ClientError as e:
         logger.error(f"[DOC_DB] Failed to query documents for user_id={user_id}: {e}")
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Query: hospital-scoped views
+# ---------------------------------------------------------------------------
+
+def get_documents_for_hospital_view(
+    user_id: str,
+    hospital_id: str,
+) -> List[Dict[str, Any]]:
+    """
+    Documents a given hospital is allowed to see for one patient:
+    the patient's own uploads (source=USER) PLUS the docs *this* hospital
+    uploaded for the patient — never another hospital's docs.
+
+    Implemented as a single user-partition query with a source/hospital_id
+    filter. A patient's document count is small, so the filter cost is trivial
+    and isolation is guaranteed (other hospitals' rows are dropped server-side).
+    """
+    items: List[Dict[str, Any]] = []
+    kwargs = {
+        "KeyConditionExpression": Key("user_id").eq(user_id),
+        "FilterExpression": Attr("source").eq("USER") | Attr("hospital_id").eq(hospital_id),
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            response = documents_table.query(**kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        logger.info(
+            f"[DOC_DB] Hospital view: {len(items)} doc(s) for user_id={user_id} "
+            f"hospital_id={hospital_id}"
+        )
+        return items
+    except ClientError as e:
+        logger.error(
+            f"[DOC_DB] Failed hospital view query user_id={user_id} "
+            f"hospital_id={hospital_id}: {e}"
+        )
+        return []
+
+
+def get_documents_uploaded_by_hospital(hospital_id: str) -> List[Dict[str, Any]]:
+    """
+    Every document a hospital uploaded, across all patients (dashboard view).
+
+    Uses the sparse hospital-index (hospital_id → created_at), so it returns
+    only source=HOSPITAL docs for this hospital — patient self-uploads never
+    appear here.
+    """
+    items: List[Dict[str, Any]] = []
+    kwargs = {
+        "IndexName": "hospital-index",
+        "KeyConditionExpression": Key("hospital_id").eq(hospital_id),
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            response = documents_table.query(**kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+        logger.info(
+            f"[DOC_DB] {len(items)} doc(s) uploaded by hospital_id={hospital_id}"
+        )
+        return items
+    except ClientError as e:
+        logger.error(
+            f"[DOC_DB] Failed hospital-index query hospital_id={hospital_id}: {e}"
+        )
         return []
 
 

@@ -1,6 +1,6 @@
 from typing import Literal, Optional
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, model_validator
 
 
 class GoogleAuthRequest(BaseModel):
@@ -38,6 +38,12 @@ class UserProfileCreate(BaseModel):
     name: Optional[str] = None
 
 
+class AbhaSignupRequest(BaseModel):
+    """Provision a loginable Kokoro user from an existing ABHA account."""
+    abha_number: str = Field(...)
+    hospital_id: Optional[str] = None  # optional: ABHA onboarding may run without a hospital context
+
+
 class DoctorProfileCreate(BaseModel):
     phoneNumber: str = Field(..., min_length=8)
     # email: EmailStr = Field(...)  # Now mandatory (same as user signup)
@@ -51,4 +57,11 @@ class DoctorProfileCreate(BaseModel):
 
 
 class DeleteAccountRequest(BaseModel):
-    phoneNumber: str = Field(..., min_length=8)
+    phoneNumber: Optional[str] = Field(default=None, min_length=8)
+    hospital_id: Optional[str] = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def require_deletion_target(self) -> "DeleteAccountRequest":
+        if not (self.phoneNumber or "").strip() and not (self.hospital_id or "").strip():
+            raise ValueError("phoneNumber or hospital_id is required")
+        return self

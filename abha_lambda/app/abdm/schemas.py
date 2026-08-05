@@ -77,6 +77,40 @@ class LoginVerifyResponse(BaseModel):
         extra = "allow"
 
 
+class MobileLoginAccount(BaseModel):
+    """One ABHA account linked to a mobile number (7.4 Step 2 `accounts[]`)."""
+    ABHANumber: Optional[str] = None
+    preferredAbhaAddress: Optional[str] = None
+    name: Optional[str] = None
+    gender: Optional[str] = None
+    dob: Optional[str] = None
+    status: Optional[str] = None
+    profilePhoto: Optional[str] = None
+    kycVerified: Optional[bool] = None
+
+    class Config:
+        extra = "allow"
+
+
+class MobileLoginVerifyResponse(BaseModel):
+    """
+    7.4 Step 2 — verify mobile OTP.
+
+    Does NOT create a session. Returns a SHORT-LIVED (5 min) T-token plus the
+    list of ABHA accounts linked to the mobile. The caller picks one account
+    and calls verify/user (Step 3) with the T-token to get the real session.
+    """
+    txnId: str
+    token: Optional[str] = None           # short-lived T-token for verify/user
+    expiresIn: Optional[int] = None
+    authResult: Optional[str] = None
+    message: Optional[str] = None
+    accounts: List[MobileLoginAccount] = []
+
+    class Config:
+        extra = "allow"
+
+
 # ---------------------------------------------------------------------------
 # Milestone 2 — HIP Initiated Linking
 # ---------------------------------------------------------------------------
@@ -112,6 +146,158 @@ class CareContextCallbackPayload(BaseModel):
     status: Optional[str] = None
     response: Optional[Any] = None
     error: Optional[Any] = None
+
+    class Config:
+        extra = "allow"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 2 — Data Flow (Section 6)
+#
+# Inbound webhook payloads (ABDM → Kokoro). consentDetail / keyMaterial are
+# kept as free-form dicts on purpose: we persist them verbatim and hand
+# keyMaterial straight to the encryption module without re-modelling ABDM's
+# evolving shapes.
+# ---------------------------------------------------------------------------
+
+class ConsentNotification(BaseModel):
+    """The inner `notification` object of the 6.3.1 consent callback."""
+    status: Optional[str] = None                 # GRANTED | REVOKED | EXPIRED
+    consentId: Optional[str] = None
+    consentDetail: Optional[dict] = None          # full consent artefact
+    signature: Optional[str] = None
+    grantAcknowledgement: Optional[bool] = None
+
+    class Config:
+        extra = "allow"
+
+
+class ConsentNotificationPayload(BaseModel):
+    """6.3.1 — ABDM posts this to {callbackURL}/api/v3/consent/request/hip/notify."""
+    notification: ConsentNotification
+
+    class Config:
+        extra = "allow"
+
+
+class HiRequest(BaseModel):
+    """The inner `hiRequest` object of the 6.3.3 health-information request."""
+    consent: Optional[dict] = None                # {"id": "<consentId>"}
+    dateRange: Optional[dict] = None              # {"from": ..., "to": ...}
+    dataPushUrl: Optional[str] = None             # HIU URL to push encrypted data to
+    keyMaterial: Optional[dict] = None            # HIU ECDH public key + nonce
+
+    class Config:
+        extra = "allow"
+
+
+class HealthInformationRequestPayload(BaseModel):
+    """6.3.3 — ABDM posts this to {callbackURL}/api/v3/hip/health-information/request."""
+    transactionId: Optional[str] = None           # may also arrive as REQUEST-ID header
+    hiRequest: HiRequest
+
+    class Config:
+        extra = "allow"
+
+
+# ---------------------------------------------------------------------------
+# Milestone 3 — HIU (Health Information User)
+#
+# Inbound API requests (Hospital Portal → Kokoro) and inbound ABDM → Kokoro
+# HIU callbacks. Outbound ABDM request bodies are assembled in the service layer.
+# ---------------------------------------------------------------------------
+
+# --- Hospital Portal → Kokoro (HIU outbound triggers) ---
+
+class HiuConsentInitRequest(BaseModel):
+    """Start a consent request as HIU (4.3.1)."""
+    hospital_id: str
+    patient_abha_address: str                     # e.g. "abc@sbx"
+    hi_types: List[str]                           # consented document types
+    date_from: str                                # ISO8601 — permission window start
+    date_to: str                                  # ISO8601 — permission window end
+    data_erase_at: str                            # ISO8601 — when HIU must erase data
+    requester_name: str
+    requester_id_value: str                       # e.g. registration number "MH1001"
+    requester_id_type: str = "REGNO"
+    requester_id_system: str = "https://www.mciindia.org"
+    purpose_code: str = "CAREMGT"
+    purpose_text: str = "Care Management"
+    purpose_ref_uri: str = "www.abdm.gov.in"
+    access_mode: str = "VIEW"
+    frequency_unit: str = "HOUR"
+    frequency_value: int = 1
+    frequency_repeats: int = 0
+    hip_id: Optional[str] = None                  # optional target HIP service id
+    care_contexts: Optional[List[dict]] = None    # optional [{patientReference, careContextReference}]
+
+
+class HiuConsentStatusRequest(BaseModel):
+    hospital_id: str
+    consent_request_id: str
+
+
+class HiuConsentFetchRequest(BaseModel):
+    hospital_id: str
+    consent_id: str
+
+
+class HiuHealthInfoRequest(BaseModel):
+    hospital_id: str
+    consent_id: str
+    date_from: str
+    date_to: str
+
+
+# --- ABDM → Kokoro (HIU inbound callbacks) ---
+
+class HiuConsentOnInitPayload(BaseModel):
+    """4.3.2 — {callback}/api/v3/hiu/consent/request/on-init."""
+    consentRequest: Optional[dict] = None         # {"id": "<consentRequestId>"}
+    error: Optional[Any] = None
+    response: Optional[Any] = None                 # {"requestId": "<our REQUEST-ID>"}
+
+    class Config:
+        extra = "allow"
+
+
+class HiuConsentNotifyPayload(BaseModel):
+    """Patient approved/denied/revoked — {callback}/api/v3/hiu/consent/request/notify."""
+    notification: Optional[dict] = None            # {consentRequestId, status, consentArtefacts:[{id}]}
+
+    class Config:
+        extra = "allow"
+
+
+class HiuConsentOnStatusPayload(BaseModel):
+    """4.3.6 — {callback}/api/v3/hiu/consent/request/on-status."""
+    consentRequest: Optional[dict] = None          # {"id":..., "status":...}
+    error: Optional[Any] = None
+    response: Optional[Any] = None
+    resp: Optional[Any] = None
+
+    class Config:
+        extra = "allow"
+
+
+class HiuConsentOnFetchPayload(BaseModel):
+    """4.3.8 — {callback}/api/v3/hiu/consent/on-fetch."""
+    consent: Optional[dict] = None                 # {"status":..., "consentDetail":{...}, "signature":...}
+    error: Optional[Any] = None
+    response: Optional[Any] = None
+    resp: Optional[Any] = None
+
+    class Config:
+        extra = "allow"
+
+
+class HiuDataTransferPayload(BaseModel):
+    """6.3.5 inbound — a HIP pushes encrypted records to our HIU dataPushUrl."""
+    pageNumber: Optional[int] = None
+    pageCount: Optional[int] = None
+    transactionId: Optional[str] = None
+    entries: Optional[List[dict]] = None
+    keyMaterial: Optional[dict] = None             # the HIP's ECDH public key + nonce
 
     class Config:
         extra = "allow"

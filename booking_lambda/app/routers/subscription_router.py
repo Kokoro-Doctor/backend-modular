@@ -1,7 +1,7 @@
 """
 Subscription Router - API endpoints for subscription management
 """
-from fastapi import APIRouter, HTTPException, Path, Query, Header, UploadFile, File
+from fastapi import APIRouter, HTTPException, Path, Query, Header
 from typing import Optional, List
 from app.models.schemas import (
     SubscriptionPlanCreate,
@@ -30,13 +30,43 @@ from app.services.user_subscription_service import (
     increment_appointments_used,
     cancel_subscription
 )
+from app.services.user_doctor_relation_service import get_doctor_patients
 from app.utils.error_utils import handle_exception
 from app.logger import get_logger
-from app.config import ADMIN_KEY
-from app.services.patient_import_service import process_patient_excel
+from app.config import ADMIN_KEY, USERS_TABLE
 
 logger = get_logger(__name__)
 router = APIRouter(prefix="/booking", tags=["Subscription"])
+
+
+SENSITIVE_PATIENT_RESPONSE_FIELDS = {
+    "password",
+    "password_hash",
+    "hashed_password",
+    "otp",
+    "otp_hash",
+    "otp_expiry",
+    "otp_attempts",
+    "reset_token",
+    "refresh_token",
+    "access_token",
+}
+
+
+def _get_user(user_id: str) -> Optional[dict]:
+    try:
+        resp = USERS_TABLE.get_item(Key={"user_id": user_id})
+        user = resp.get("Item")
+    except Exception as e:
+        logger.warning(f"Failed to load user details for doctor-patient relation user_id={user_id!r}: {e}")
+        return None
+    if not user:
+        return None
+    return {
+        key: value
+        for key, value in user.items()
+        if key not in SENSITIVE_PATIENT_RESPONSE_FIELDS and not str(key).startswith("_")
+    }
 
 
 # ==================== Subscription Plan Endpoints ====================
@@ -171,25 +201,6 @@ def get_user_subscriptions_endpoint(user_id: str = Path(..., description="User I
         handle_exception(e, "Get user subscriptions")
 
 
-@router.post("/doctors/{doctor_id}/import-patients")
-def import_patients_endpoint(
-    doctor_id: str = Path(..., description="Doctor ID"),
-    file: UploadFile = File(..., description="Excel file (.xlsx) with columns: name, phone, email, age, gender, condition (phone mandatory)"),
-):
-    """
-    Import patients from Excel and subscribe them to the doctor.
-    Uses PLAN_ID_2 as default subscription plan.
-    Creates users if they don't exist (by phone). Skips rows without phone or already subscribed.
-    """
-    try:
-        result = process_patient_excel(file=file, doctor_id=doctor_id, plan_id="PLAN_ID_2")
-        return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        handle_exception(e, "Import patients")
-
-
 @router.get("/doctors/{doctor_id}/subscribers", response_model=List[SubscriptionResponse])
 def get_doctor_subscribers_endpoint(doctor_id: str = Path(..., description="Doctor ID")):
     """
@@ -202,6 +213,30 @@ def get_doctor_subscribers_endpoint(doctor_id: str = Path(..., description="Doct
         raise
     except Exception as e:
         handle_exception(e, "Get doctor subscribers")
+
+
+@router.get("/doctors/{doctor_id}/patients")
+def get_doctor_patients_endpoint(doctor_id: str = Path(..., description="Doctor ID")):
+    """
+    Get all active patients linked to a doctor from the unified UserDoctor table.
+
+    Includes both hospital-assigned patients and users who subscribed from the
+    patient portal.
+    """
+    try:
+        relations = get_doctor_patients(doctor_id)
+        patients = []
+        for relation in relations:
+            user_id = relation.get("user_id")
+            patients.append({
+                "user": _get_user(user_id) if user_id else None,
+                "relation": relation,
+            })
+        return {"doctor_id": doctor_id, "patients": patients, "count": len(patients)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        handle_exception(e, "Get doctor patients")
 
 
 @router.get("/subscriptions/validate", response_model=SubscriptionValidationResponse)
@@ -288,4 +323,3 @@ def create_test_subscription_endpoint(
         raise
     except Exception as e:
         handle_exception(e, "Create test subscription")
-

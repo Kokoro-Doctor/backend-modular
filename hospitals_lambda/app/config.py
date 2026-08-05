@@ -16,9 +16,10 @@ DOCTOR_AVAILABILITY_TABLE = dynamodb.Table(
     os.environ.get("DOCTOR_AVAILABILITY_TABLE", "DoctorAvailabilityTable")
 )
 
-USER_DOCTOR_RELATIONS_TABLE = dynamodb.Table(
-    os.environ.get("USER_DOCTOR_RELATIONS_TABLE", "UserDoctorRelations")
-)
+# Junction tables for the user <-> doctor <-> hospital many-to-many graph.
+USER_HOSPITAL_TABLE = dynamodb.Table(os.environ.get("USER_HOSPITAL_TABLE", "UserHospital"))
+DOCTOR_HOSPITAL_TABLE = dynamodb.Table(os.environ.get("DOCTOR_HOSPITAL_TABLE", "DoctorHospital"))
+USER_DOCTOR_TABLE = dynamodb.Table(os.environ.get("USER_DOCTOR_TABLE", "UserDoctor"))
 
 # MedilockerDocuments table — patient docs are stored here (same table as medilocker)
 DOCUMENTS_TABLE = dynamodb.Table(os.environ.get("DOCUMENTS_TABLE", "MedilockerDocuments"))

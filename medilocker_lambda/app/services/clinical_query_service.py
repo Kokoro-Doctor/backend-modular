@@ -9,6 +9,7 @@ from typing import Dict, Any
 
 from openai import OpenAI
 
+from app.config import CLAIM_REASONING_MODEL
 from app.logger import get_logger
 from app.utils.openai_errors import to_http_exception
 
@@ -235,8 +236,9 @@ def answer_clinical_query(
     try:
         response = client.chat.completions.create(
             # model="gpt-4o",
-            model="llama-3.3-70b-versatile",
-            temperature=0.2,
+            model=CLAIM_REASONING_MODEL,
+                                    temperature=0.2,
+            max_tokens=4000,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {

@@ -53,7 +53,11 @@ def create_user_subscription(
     existing_subscription = get_subscription_by_payment_id(payment_id)
     if existing_subscription:
         logger.info(f"Subscription already exists for payment_id {payment_id}: {existing_subscription.get('subscription_id')}")
-        sync_relation_for_subscription(user_id, doctor_id, existing_subscription["subscription_id"])
+        sync_relation_for_subscription(
+            existing_subscription.get("user_id", user_id),
+            existing_subscription.get("doctor_id", doctor_id),
+            existing_subscription["subscription_id"],
+        )
         return existing_subscription
     
     # Fetch plan details
@@ -134,7 +138,11 @@ def create_user_subscription(
             logger.warning(f"Conditional check failed for subscription creation, fetching existing subscription for payment_id {payment_id}")
             existing_subscription = get_subscription_by_payment_id(payment_id)
             if existing_subscription:
-                sync_relation_for_subscription(user_id, doctor_id, existing_subscription["subscription_id"])
+                sync_relation_for_subscription(
+                    existing_subscription.get("user_id", user_id),
+                    existing_subscription.get("doctor_id", doctor_id),
+                    existing_subscription["subscription_id"],
+                )
                 return existing_subscription
             # If still not found, it might be a different error, re-raise
             logger.error(f"Subscription not found after conditional check failed: {e}")
@@ -604,4 +612,3 @@ def _update_subscription_status(subscription: dict, now: datetime) -> dict:
         subscription["status"] = SubscriptionStatus.EXHAUSTED.value
     
     return subscription
-

@@ -20,9 +20,16 @@ users_table = dynamodb.Table(USERS_TABLE)
 
 # # OpenAI API Key
 # OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-# Groq API Key & base URL
+# Groq API Key & base URL (kept for backward compatibility; no longer the
+# default provider — see OPENROUTER_* below)
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
+
+# OpenRouter API Key & base URL — now the primary LLM provider for
+# claim_validator_graph.py and the standalone extraction services, to avoid
+# Groq's restrictive per-model TPM/TPD free-tier limits.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
 # Prescription: max number of most recent documents to use when generating prescription
 PRESCRIPTION_MAX_DOCS = int(os.getenv("PRESCRIPTION_MAX_DOCS", "10"))
@@ -31,17 +38,22 @@ PRESCRIPTION_MAX_DOCS = int(os.getenv("PRESCRIPTION_MAX_DOCS", "10"))
 ALLOWED_EXTENSIONS = {"jpg", "jpeg", "png", "heic", "heif", "webp", "tiff", "tif", "bmp"}
 MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB (decoded size)
 
-# Hospital raw data ingestion (separate from Medilocker)
-HOSPITAL_DATA_PREFIX = "HospitalData/"
-HOSPITAL_UPLOADS_PREFIX = "hospital_uploads/"  # For presigned batch uploads
-HOSPITAL_FILES_TABLE = os.getenv("HOSPITAL_FILES_TABLE", "HospitalFiles")
 HOSPITAL_API_KEY = os.getenv("HOSPITAL_API_KEY")
-hospital_files_table = dynamodb.Table(HOSPITAL_FILES_TABLE)
 
-# ── Claim Validator config ──────────────────────────────────────────
+# ── Claim Validator config (Groq direct) ────────────────────────────────
+# CLAIM_VALIDATOR_MODEL — high-frequency parsing/extraction. llama-3.1-8b
+# has the highest TPD (500K) of Groq's Llama models, giving the most
+# headroom for frequent extraction calls.
 CLAIM_VALIDATOR_MODEL = os.getenv(
     "CLAIM_VALIDATOR_MODEL",
-    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-120b",
+)
+
+# CLAIM_REASONING_MODEL — lower-frequency reasoning/audit calls, where the
+# stronger 70B model's quality matters more than its smaller 100K TPD.
+CLAIM_REASONING_MODEL = os.getenv(
+    "CLAIM_REASONING_MODEL",
+    "llama-3.3-70b-versatile",
 )
 
 # Default policy baselines when company not detected in form

@@ -6,9 +6,7 @@ from fastapi import APIRouter, HTTPException, Header
 from app import config
 from app.logger import get_logger
 from app.models import schemas
-from app.services.account_service import delete_user_account, delete_doctor_account
-from app.services.user_service import get_user_by_phone_for_admin
-from app.services.doctor_service import get_doctor_by_phone_for_admin
+from app.services.account_service import delete_account_by_phone
 
 logger = get_logger(__name__)
 
@@ -21,9 +19,13 @@ def delete_account(
     x_admin_key: str = Header(..., alias="x-admin-key", description="Internal admin key for authorization")
 ):
     """
-    Internal endpoint to delete a user or doctor account by phone number.
-    Deletes all related data from all tables and S3.
-    
+    Internal endpoint to delete user, doctor, and/or hospital account data.
+
+    Send phoneNumber to resolve user/doctor accounts and a hospital whose
+    contact number matches. Send hospital_id for an exact hospital sweep,
+    including a partially-deleted hospital whose profile row is already gone.
+    Both fields may be supplied in one request.
+
     Requires x-admin-key HTTP header for authorization.
     """
     try:
@@ -32,57 +34,54 @@ def delete_account(
             logger.warning(f"Unauthorized delete account attempt with key: {x_admin_key[:10]}...")
             raise HTTPException(status_code=403, detail="Unauthorized: Invalid admin key")
 
-        # Normalize phone number
-        from app.utils.db_utils import normalize_phone_number
-        normalized_phone = normalize_phone_number(data.phoneNumber)
-        if not normalized_phone:
-            raise HTTPException(status_code=400, detail="Invalid phone number format")
+        try:
+            result = delete_account_by_phone(
+                phone_number=data.phoneNumber,
+                hospital_id=data.hospital_id,
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
-        # Check if user exists
-        user = get_user_by_phone_for_admin(normalized_phone)
-        if user:
-            user_id = user.get("user_id")
-            email = user.get("email")
-            logger.info(f"Deleting user account: {user_id} (phone: {normalized_phone})")
-            
-            deleted_items = delete_user_account(user_id, normalized_phone, email)
-            
-            return {
-                "success": True,
-                "account_type": "user",
-                "user_id": user_id,
-                "phone_number": normalized_phone,
-                "deleted_items": deleted_items,
-                "message": f"User account {user_id} and all related data deleted successfully"
-            }
+        if not result["account_found"]:
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    "No account or related data found for target: "
+                    f"phoneNumber={result['phone_number']!r}, "
+                    f"hospital_id={data.hospital_id!r}"
+                )
+            )
 
-        # Check if doctor exists
-        doctor = get_doctor_by_phone_for_admin(normalized_phone)
-        if doctor:
-            doctor_id = doctor.get("doctor_id")
-            email = doctor.get("email")
-            logger.info(f"Deleting doctor account: {doctor_id} (phone: {normalized_phone})")
-            
-            deleted_items = delete_doctor_account(doctor_id, normalized_phone, email)
-            
-            return {
-                "success": True,
-                "account_type": "doctor",
-                "doctor_id": doctor_id,
-                "phone_number": normalized_phone,
-                "deleted_items": deleted_items,
-                "message": f"Doctor account {doctor_id} and all related data deleted successfully"
-            }
+        types = result["account_types"]
+        if types:
+            label = ", ".join(types)
+            target = result["phone_number"] or result["hospital_id"]
+            message = f"Deleted {label} account data for {target}"
+        else:
+            # Identity rows were gone but orphaned data remained and was cleaned up.
+            target = result["phone_number"] or result["hospital_id"]
+            message = f"No profile row found; cleaned up leftover data for {target}"
 
-        # Neither user nor doctor found
-        raise HTTPException(
-            status_code=404,
-            detail=f"No account found with phone number: {normalized_phone}"
-        )
+        success = not result["errors"]
+        if not success:
+            message = f"Partial deletion for {target}; retry after resolving reported errors"
+
+        return {
+            "success": success,
+            "phone_number": result["phone_number"],
+            "email": result["email"],
+            "account_types": types,
+            "user_id": result["user_id"],
+            "doctor_id": result["doctor_id"],
+            "hospital_id": result["hospital_id"],
+            "hospital_ids": result["hospital_ids"],
+            "deleted": result["deleted"],
+            "errors": result["errors"],
+            "message": message,
+        }
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Error deleting account: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
-

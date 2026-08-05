@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from openai import OpenAI
 
 # from app.config import OPENAI_API_KEY
-from app.config import GROQ_API_KEY, GROQ_BASE_URL
+from app.config import GROQ_API_KEY, GROQ_BASE_URL, CLAIM_REASONING_MODEL
 from app.logger import get_logger
 from app.services.context_service import extract_patient_details_from_context
 
@@ -101,7 +101,7 @@ def _generate_prescription_from_context(
 
         Patient context:
         <<<CONTEXT_JSON>>>
-        """.replace("<<<CONTEXT_JSON>>>", json.dumps(prompt_input, indent=2))
+        """.replace("<<<CONTEXT_JSON>>>", json.dumps(prompt_input))
 
     messages = [
         {
@@ -124,9 +124,10 @@ def _generate_prescription_from_context(
     try:
         response = client.chat.completions.create(
             # model="gpt-4o",
-            model="llama-3.3-70b-versatile",
-            messages=messages,
+            model=CLAIM_REASONING_MODEL,
+                                    messages=messages,
             temperature=0.3,
+            max_tokens=3000,
             response_format={"type": "json_object"},
         )
 

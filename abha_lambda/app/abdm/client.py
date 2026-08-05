@@ -40,25 +40,40 @@ def _base_headers(user_token: Optional[str] = None) -> dict:
     return headers
 
 
-def post(path: str, payload: Any, user_token: Optional[str] = None) -> dict:
-    """POST to the ABHA base URL. Raises HTTPException on non-2xx responses."""
+def post(
+    path: str,
+    payload: Any,
+    user_token: Optional[str] = None,
+    extra_headers: Optional[dict] = None,
+) -> dict:
+    """
+    POST to the ABHA base URL. Raises HTTPException on non-2xx responses.
+
+    Pass extra_headers to add endpoint-specific headers, e.g. the short-lived
+    `T-token` required by mobile-login verify/user (7.4 Step 3).
+    """
     url = f"{config.ABDM_ABHA_BASE_URL}{path}"
     headers = _base_headers(user_token)
+    if extra_headers:
+        headers.update(extra_headers)
     logger.debug("[ABDMClient] POST %s", path)
 
     resp = requests.post(url, json=payload, headers=headers, timeout=20)
     return _handle_response(resp, path)
 
 
-def get(path: str, user_token: Optional[str] = None, raw: bool = False):
+def get(path: str, user_token: Optional[str] = None, raw: bool = False, accept: Optional[str] = None):
     """
     GET from the ABHA base URL.
 
     Set raw=True to receive the raw Response object (used for binary downloads
     like the ABHA card PDF).
+    Pass accept to override the Accept header (e.g. "image/png" for the ABHA card endpoint).
     """
     url = f"{config.ABDM_ABHA_BASE_URL}{path}"
     headers = _base_headers(user_token)
+    if accept:
+        headers["Accept"] = accept
     logger.debug("[ABDMClient] GET %s", path)
 
     resp = requests.get(url, headers=headers, timeout=20)

@@ -3,7 +3,7 @@ Extraction service - OCR and document extraction pipeline.
 
 Orchestrates: OCR (Textract) → GPT structured extraction → patient context.
 Delegates prescription synthesis to prescription_service.
-Images only (no PDF support).
+Supports images and PDFs.
 """
 import base64
 import json
@@ -11,14 +11,25 @@ import os
 import time
 from typing import List, Dict, Any, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from uuid import uuid4
+
 from fastapi import HTTPException
 from openai import OpenAI
 
 # from app.config import OPENAI_API_KEY, PRESCRIPTION_MAX_DOCS, ALLOWED_EXTENSIONS
-from app.config import GROQ_API_KEY, GROQ_BASE_URL, PRESCRIPTION_MAX_DOCS, ALLOWED_EXTENSIONS
+from app.config import (
+    GROQ_API_KEY,
+    GROQ_BASE_URL,
+    PRESCRIPTION_MAX_DOCS,
+    ALLOWED_EXTENSIONS,
+    S3_BUCKET,
+    S3_FOLDER_PREFIX,
+    s3_client,
+    CLAIM_VALIDATOR_MODEL,
+)
 from app.logger import get_logger
 from app.models.structured_data import StructuredMedicalData
-from app.services.ocr_service import extract_text_from_image
+from app.services.ocr_service import extract_text_from_image, extract_text_from_pdf_s3
 from app.services.context_service import (
     build_patient_context,
     documents_from_extracted_data,
@@ -28,6 +39,40 @@ from app.services import prescription_service
 logger = get_logger(__name__)
 
 _LOG_TRUNCATE = 1000
+PDF_EXTENSIONS = {"pdf"}
+PRESCRIPTION_ALLOWED_EXTENSIONS = ALLOWED_EXTENSIONS | PDF_EXTENSIONS
+
+MAX_CHARS_PER_DOC = 2000  # keeps requests under gpt-oss-20b's TPM limit
+
+
+def _is_pdf(filename: str) -> bool:
+    _, ext = os.path.splitext(filename)
+    return ext.lstrip(".").lower() in PDF_EXTENSIONS
+
+
+def _upload_temp_to_s3(file_bytes: bytes, filename: str) -> str:
+    """Upload a PDF to a temporary S3 location for Textract async OCR."""
+    temp_id = uuid4().hex[:8]
+    _, ext = os.path.splitext(filename)
+    ext = ext.lstrip(".").lower() or "pdf"
+    s3_key = f"{S3_FOLDER_PREFIX}_temp/prescription/{temp_id}/document.{ext}"
+
+    s3_client.put_object(
+        Bucket=S3_BUCKET,
+        Key=s3_key,
+        Body=file_bytes,
+    )
+    logger.info(f"[PRESCRIPTION] Uploaded temp file to s3://{S3_BUCKET}/{s3_key}")
+    return s3_key
+
+
+def _cleanup_temp_s3(s3_key: str) -> None:
+    """Best-effort cleanup of temporary S3 object after OCR completes."""
+    try:
+        s3_client.delete_object(Bucket=S3_BUCKET, Key=s3_key)
+        logger.info(f"[PRESCRIPTION] Cleaned up temp file s3://{S3_BUCKET}/{s3_key}")
+    except Exception as e:
+        logger.warning(f"[PRESCRIPTION] Failed to cleanup temp file {s3_key}: {e}")
 
 
 def _truncate_for_log(text: str, max_len: int = _LOG_TRUNCATE) -> str:
@@ -56,6 +101,10 @@ def extract_structured_data_from_text(
         if not GROQ_API_KEY:
             raise HTTPException(status_code=500, detail="Groq API key not configured")
         client = OpenAI(api_key=GROQ_API_KEY, base_url=GROQ_BASE_URL)
+
+    if len(ocr_text) > MAX_CHARS_PER_DOC:
+        ocr_text = ocr_text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
+
     extraction_prompt = f"""
         You are a clinical medical data extraction system.
 
@@ -203,9 +252,10 @@ def extract_structured_data_from_text(
     try:
         response = client.chat.completions.create(
             # model="gpt-4o",
-            model="llama-3.3-70b-versatile",
-            messages=messages,
+            model=CLAIM_VALIDATOR_MODEL,
+                        messages=messages,
             temperature=0.1,
+            max_tokens=3000,
             response_format={"type": "json_object"},
         )
 
@@ -223,15 +273,16 @@ def extract_structured_data_from_text(
 
 def _extract_ocr_from_file(file_data: Dict[str, Any]) -> Optional[Dict[str, str]]:
     """
-    Extract OCR text from a single image file. Returns {"filename", "text"} or None.
-    Only image formats in ALLOWED_EXTENSIONS are supported.
+    Extract OCR text from a single image or PDF file.
+
+    Returns {"filename", "text"} or None.
     """
     filename = file_data.get("filename", "unknown")
     content = file_data.get("content", "")
 
     _, ext = os.path.splitext(filename)
     ext = ext.lstrip(".").lower() or "bin"
-    if ext not in ALLOWED_EXTENSIONS:
+    if ext not in PRESCRIPTION_ALLOWED_EXTENSIONS:
         logger.warning(f"[PRESCRIPTION] Skipping {filename} - unsupported type .{ext}")
         return None
 
@@ -241,7 +292,14 @@ def _extract_ocr_from_file(file_data: Dict[str, Any]) -> Optional[Dict[str, str]
 
     try:
         file_bytes = base64.b64decode(content)
-        ocr_text = extract_text_from_image(file_bytes)
+        if _is_pdf(filename):
+            s3_key = _upload_temp_to_s3(file_bytes, filename)
+            try:
+                ocr_text = extract_text_from_pdf_s3(S3_BUCKET, s3_key)
+            finally:
+                _cleanup_temp_s3(s3_key)
+        else:
+            ocr_text = extract_text_from_image(file_bytes)
         if ocr_text and ocr_text.strip():
             logger.info(f"[PRESCRIPTION] OCR extracted {len(ocr_text)} chars from {filename}")
             return {"filename": filename, "text": ocr_text}
@@ -311,16 +369,16 @@ def extract_structured_data_from_files(
     if not files:
         raise HTTPException(status_code=400, detail="No files provided")
 
-    # Validate all files are images (no PDF)
+    # Validate all files are supported before starting OCR.
     for fd in files:
         filename = fd.get("filename", "unknown")
         _, ext = os.path.splitext(filename)
         ext = ext.lstrip(".").lower() or "bin"
-        if ext not in ALLOWED_EXTENSIONS:
+        if ext not in PRESCRIPTION_ALLOWED_EXTENSIONS:
             raise HTTPException(
                 status_code=400,
                 detail=f"File type '.{ext}' is not allowed. "
-                f"Accepted: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
+                f"Accepted: {', '.join(sorted(PRESCRIPTION_ALLOWED_EXTENSIONS))}",
             )
 
     try:

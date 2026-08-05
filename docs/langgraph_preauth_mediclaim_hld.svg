@@ -1,0 +1,51 @@
+<svg width="680" viewBox="0 0 680 700" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">
+<title>LangGraph HLD for insurance pre-auth and mediclaim flow</title>
+<desc>A single LangGraph pipeline that OCRs uploaded documents, then routes to an audit path when a claim form is present (mediclaim reimbursement validation) or an autofill path when it is absent (pre-authorization form filling).</desc>
+<defs>
+<marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M1,1 L7,4 L1,7" fill="none" stroke="#888780" stroke-width="1.5"/></marker>
+<style>
+text{fill:#2C2C2A}
+.th{font-size:14px;font-weight:600}
+.ts{font-size:12px;font-weight:400}
+.arr{stroke:#888780;stroke-width:1.5;fill:none}
+.gray{fill:#F1EFE8;stroke:#5F5E5A}
+.blue{fill:#E6F1FB;stroke:#185FA5}
+.teal{fill:#E1F5EE;stroke:#0F6E56}
+.purple{fill:#EEEDFE;stroke:#534AB7}
+rect{stroke-width:1.5}
+</style>
+</defs>
+
+<rect class="gray" x="290" y="40" width="100" height="40" rx="20"/><text class="th" x="340" y="65" text-anchor="middle">START</text>
+<line class="arr" x1="340" y1="80" x2="340" y2="104" marker-end="url(#ah)"/>
+
+<rect class="blue" x="220" y="106" width="240" height="58" rx="8"/><text class="th" x="340" y="130" text-anchor="middle">ocr_extractor</text><text class="ts" x="340" y="150" text-anchor="middle">Textract · parallel · no LLM</text>
+<line class="arr" x1="340" y1="164" x2="340" y2="184" marker-end="url(#ah)"/>
+
+<rect class="gray" x="245" y="186" width="190" height="58" rx="8"/><text class="th" x="340" y="210" text-anchor="middle">flow_router</text><text class="ts" x="340" y="230" text-anchor="middle">claim form present?</text>
+
+<path class="arr" d="M245,220 C170,235 150,240 150,262" marker-end="url(#ah)"/>
+<path class="arr" d="M435,220 C510,235 530,240 530,262" marker-end="url(#ah)"/>
+<text class="ts" x="150" y="258" text-anchor="middle" fill="#0F6E56">yes → audit</text>
+<text class="ts" x="530" y="258" text-anchor="middle" fill="#534AB7">no → autofill</text>
+
+<text class="th" x="150" y="284" text-anchor="middle" fill="#0F6E56">Audit · mediclaim</text>
+<text class="th" x="530" y="284" text-anchor="middle" fill="#534AB7">Autofill · pre-auth</text>
+
+<rect class="teal" x="40" y="296" width="220" height="58" rx="8"/><text class="th" x="150" y="320" text-anchor="middle">claim_field_extractor</text><text class="ts" x="150" y="340" text-anchor="middle">LLM · form → JSON</text>
+<line class="arr" x1="150" y1="354" x2="150" y2="376" marker-end="url(#ah)"/>
+<rect class="teal" x="40" y="378" width="220" height="58" rx="8"/><text class="th" x="150" y="402" text-anchor="middle">policy_router</text><text class="ts" x="150" y="422" text-anchor="middle">rules · insurer / TPA</text>
+<line class="arr" x1="150" y1="436" x2="150" y2="458" marker-end="url(#ah)"/>
+<rect class="teal" x="40" y="460" width="220" height="58" rx="8"/><text class="th" x="150" y="484" text-anchor="middle">cross_doc_analyzer</text><text class="ts" x="150" y="504" text-anchor="middle">LLM · compare docs</text>
+<line class="arr" x1="150" y1="518" x2="150" y2="540" marker-end="url(#ah)"/>
+<rect class="teal" x="40" y="542" width="220" height="72" rx="8"/><text class="th" x="150" y="566" text-anchor="middle">claim_auditor</text><text class="ts" x="150" y="585" text-anchor="middle">LLM audit · ICD · math</text><text class="ts" x="150" y="602" text-anchor="middle">builds final report</text>
+
+<rect class="purple" x="420" y="296" width="220" height="72" rx="8"/><text class="th" x="530" y="322" text-anchor="middle">multi_doc_extractor</text><text class="ts" x="530" y="341" text-anchor="middle">LLM · extract all data</text><text class="ts" x="530" y="358" text-anchor="middle">+ ICD lookup</text>
+<line class="arr" x1="530" y1="368" x2="530" y2="390" marker-end="url(#ah)"/>
+<rect class="purple" x="420" y="392" width="220" height="72" rx="8"/><text class="th" x="530" y="418" text-anchor="middle">claim_form_filler</text><text class="ts" x="530" y="437" text-anchor="middle">LLM · fill Medi Assist form</text><text class="ts" x="530" y="454" text-anchor="middle">+ billing math</text>
+
+<path class="arr" d="M150,614 C150,648 250,650 288,650" marker-end="url(#ah)"/>
+<path class="arr" d="M530,464 C530,610 430,650 392,650" marker-end="url(#ah)"/>
+
+<rect class="gray" x="290" y="630" width="100" height="40" rx="20"/><text class="th" x="340" y="655" text-anchor="middle">END</text>
+</svg>

@@ -7,6 +7,9 @@ from typing import List
 # Environment variables (required ones left as KeyError to fail fast in prod)
 USERS_TABLE = os.environ["USERS_TABLE"]
 DOCTORS_TABLE = os.environ["DOCTORS_TABLE"]
+USER_HOSPITAL_TABLE = os.environ.get("USER_HOSPITAL_TABLE", "UserHospital")
+DOCTOR_HOSPITAL_TABLE = os.environ.get("DOCTOR_HOSPITAL_TABLE", "DoctorHospital")
+HOSPITALS_TABLE = os.environ.get("HOSPITALS_TABLE", "Hospitals")
 AUTH_TABLE = os.environ["AUTH_TABLE"]
 AUTH_TOKENS_TABLE = os.environ["AUTH_TOKENS_TABLE"]
 SESSIONS_TABLE_NAME = os.environ["SESSIONS_TABLE"]
@@ -46,6 +49,9 @@ ADMIN_KEY = os.environ.get("ADMIN_KEY", "change-me-in-production")
 dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
 users_table = dynamodb.Table(USERS_TABLE)
 doctors_table = dynamodb.Table(DOCTORS_TABLE)
+user_hospital_table = dynamodb.Table(USER_HOSPITAL_TABLE)
+doctor_hospital_table = dynamodb.Table(DOCTOR_HOSPITAL_TABLE)
+hospitals_table = dynamodb.Table(HOSPITALS_TABLE)
 auth_table = dynamodb.Table(AUTH_TABLE)
 auth_tokens_table = dynamodb.Table(AUTH_TOKENS_TABLE)
 sessions_table = dynamodb.Table(SESSIONS_TABLE_NAME)
@@ -55,6 +61,29 @@ appointments_table = dynamodb.Table("AppointmentsTable")
 availability_table = dynamodb.Table("DoctorAvailabilityTable")
 chat_table = dynamodb.Table("ChatHistory")
 payments_table = dynamodb.Table("PaymentsTable")
+medilocker_documents_table = dynamodb.Table("MedilockerDocuments")
+user_doctor_subscriptions_table = dynamodb.Table("UserDoctorSubscriptions")
+user_doctor_table = dynamodb.Table(os.environ.get("USER_DOCTOR_TABLE", "UserDoctor"))
+user_doctor_relations_table = dynamodb.Table("UserDoctorRelations")
+doctor_earnings_table = dynamodb.Table("DoctorEarningsLedger")
+doctor_payouts_table = dynamodb.Table("DoctorPayoutsTable")
+abha_accounts_table = dynamodb.Table("AbhaAccounts")
+abdm_transactions_table = dynamodb.Table("AbdmTransactions")
+hospital_files_table = dynamodb.Table(
+    os.environ.get("HOSPITAL_FILES_TABLE", "HospitalFiles")
+)
+hospital_abdm_table = dynamodb.Table(
+    os.environ.get("HOSPITAL_ABDM_TABLE", "HospitalAbdmConfig")
+)
+consent_artefacts_table = dynamodb.Table(
+    os.environ.get("CONSENT_ARTEFACTS_TABLE", "ConsentArtefacts")
+)
+hiu_consent_requests_table = dynamodb.Table(
+    os.environ.get("HIU_CONSENT_REQUESTS_TABLE", "HiuConsentRequests")
+)
+hiu_data_requests_table = dynamodb.Table(
+    os.environ.get("HIU_DATA_REQUESTS_TABLE", "HiuDataRequests")
+)
 
 # S3 client for file deletion
 s3_client = boto3.client("s3", region_name=SMS_AWS_REGION)

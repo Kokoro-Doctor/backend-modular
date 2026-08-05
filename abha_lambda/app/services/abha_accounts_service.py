@@ -37,6 +37,7 @@ from fastapi import HTTPException
 
 from app import config
 from app.abdm.schemas import ABHAProfile, ABDMTokens
+from app.utils.abha_number import to_storage_key
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -171,7 +172,7 @@ def get_valid_token_by_kokoro_user(kokoro_user_id: str) -> str:
 
 def get(abha_number: str) -> Optional[dict]:
     """Return the raw DynamoDB item for abha_number, or None if not found."""
-    resp = config.abha_table.get_item(Key={"abha_number": abha_number})
+    resp = config.abha_table.get_item(Key={"abha_number": to_storage_key(abha_number)})
     return resp.get("Item")
 
 
@@ -344,7 +345,7 @@ def _run_update(abha_number: str, fields: dict, set_created_at_if_new: Optional[
     expr = "SET " + ", ".join(set_parts)
 
     config.abha_table.update_item(
-        Key={"abha_number": abha_number},
+        Key={"abha_number": to_storage_key(abha_number)},
         UpdateExpression=expr,
         ExpressionAttributeNames=names,
         ExpressionAttributeValues=values,

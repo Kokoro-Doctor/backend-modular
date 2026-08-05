@@ -1,7 +1,7 @@
 """
 Patient document upload service.
 
-Handles the 3 mandatory documents collected at patient admission:
+Handles documents collected at patient admission (all optional):
   - INSURANCE_POLICY
   - HOSPITAL_BILL
   - PRESCRIPTION
@@ -21,6 +21,7 @@ import unicodedata
 from datetime import datetime, timezone
 from uuid import uuid4
 
+from boto3.dynamodb.conditions import Attr, Key
 from botocore.exceptions import ClientError
 from fastapi import HTTPException, UploadFile
 
@@ -52,21 +53,31 @@ PRESCRIPTION = "PRESCRIPTION"
 # Public entry point
 # ---------------------------------------------------------------------------
 
-async def upload_single_doc(user_id: str, doc_type: str, upload_file: UploadFile) -> dict:
-    """Upload a single document for a patient and enqueue OCR. Returns the doc record dict."""
-    return await _process_single_doc(user_id, doc_type, upload_file)
+async def upload_single_doc(
+    user_id: str, doc_type: str, upload_file: UploadFile, hospital_id: str
+) -> dict:
+    """Upload a single document for a patient and enqueue OCR. Returns the doc record dict.
+
+    hospital_id is the uploading hospital (from the JWT) — recorded on the doc
+    so the hospital can later see its own uploads without exposing them to
+    other hospitals.
+    """
+    return await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
 
 
 async def upload_patient_docs(
     user_id: str,
-    insurance_policy: UploadFile,
-    hospital_bill: UploadFile,
-    prescription: UploadFile,
+    insurance_policy: UploadFile | None,
+    hospital_bill: UploadFile | None,
+    prescription: UploadFile | None,
+    hospital_id: str,
 ) -> list[dict]:
     """
-    Upload all 3 mandatory patient documents and enqueue OCR jobs.
+    Upload patient documents (all optional) and enqueue OCR jobs.
 
-    Returns a list of dicts (one per doc) with keys:
+    hospital_id is the uploading hospital (from the JWT) — recorded on each doc.
+
+    Returns a list of dicts (one per doc uploaded) with keys:
       doc_type, document_category (same uppercase value), file_id, s3_original_key
     """
     uploads = [
@@ -77,7 +88,37 @@ async def upload_patient_docs(
 
     results = []
     for doc_type, upload_file in uploads:
-        result = await _process_single_doc(user_id, doc_type, upload_file)
+        if upload_file:
+            result = await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
+            results.append(result)
+
+    return results
+
+
+async def upload_documents_for_patient(
+    user_id: str,
+    hospital_id: str,
+    files: list[UploadFile],
+    metadata_by_filename: dict,
+) -> list[dict]:
+    """
+    Attach one or more arbitrary documents to an existing patient, on behalf
+    of a hospital — independent of the add-patient/update_patient forms.
+
+    Unlike upload_patient_docs (fixed 3 admission documents), this accepts any
+    number of files and a free-form doc_type per file (e.g. follow-up
+    prescriptions, lab reports, scans added after admission). doc_type
+    defaults to "OTHER" when not supplied. No check that user_id is an
+    existing/linked patient — caller is responsible for passing a valid one.
+
+    hospital_id is the uploading hospital (from the JWT) — recorded on each
+    doc the same way as upload_patient_docs/upload_single_doc.
+    """
+    results = []
+    for upload_file in files:
+        file_meta = (metadata_by_filename or {}).get(upload_file.filename) or {}
+        doc_type = (file_meta.get("doc_type") or "OTHER").strip().upper() or "OTHER"
+        result = await _process_single_doc(user_id, doc_type, upload_file, hospital_id)
         results.append(result)
 
     return results
@@ -91,6 +132,7 @@ async def _process_single_doc(
     user_id: str,
     doc_type: str,
     upload_file: UploadFile,
+    hospital_id: str,
 ) -> dict:
     filename = upload_file.filename or f"{doc_type}.bin"
     ext = _get_extension(filename)
@@ -159,6 +201,9 @@ async def _process_single_doc(
         "ocr_status": "PENDING",
         "structured_status": "SKIPPED",
         "upload_mode": "ASYNC",
+        # Uploaded by hospital staff on behalf of the patient.
+        "source": "HOSPITAL",
+        "hospital_id": hospital_id,
         "updated_at": now_iso,
     }
 
@@ -250,3 +295,135 @@ def _sanitize_filename(filename: str) -> str:
     normalized = unicodedata.normalize("NFKD", filename)
     ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
     return ascii_only.strip() or "unnamed"
+
+
+# ---------------------------------------------------------------------------
+# Read — hospital-scoped view of a patient's documents
+# ---------------------------------------------------------------------------
+
+def list_patient_docs_for_hospital(user_id: str, hospital_id: str) -> list[dict]:
+    """
+    Documents a hospital may see for one patient: the patient's own uploads
+    (source=USER) PLUS the docs *this* hospital uploaded — never another
+    hospital's docs.
+
+    Single user-partition query on MedilockerDocuments with a source/hospital_id
+    filter. Returns newest-first, each with a short-lived presigned download URL.
+    """
+    items: list[dict] = []
+    kwargs = {
+        "KeyConditionExpression": Key("user_id").eq(user_id),
+        "FilterExpression": Attr("source").eq("USER") | Attr("hospital_id").eq(hospital_id),
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            response = DOCUMENTS_TABLE.query(**kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except ClientError as exc:
+        logger.error(
+            f"[PATIENT_DOCS] Hospital view query failed user_id={user_id} "
+            f"hospital_id={hospital_id}: {exc}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to fetch patient documents")
+
+    docs = []
+    for doc in items:
+        s3_key = doc.get("s3_original_key")
+        download_url = None
+        if s3_key:
+            try:
+                download_url = s3_client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": S3_BUCKET, "Key": s3_key},
+                    ExpiresIn=3600,
+                )
+            except ClientError as exc:
+                logger.warning(
+                    f"[PATIENT_DOCS] Presign failed for {s3_key}: {exc}"
+                )
+        docs.append({
+            "file_id": doc.get("file_id"),
+            "filename": doc.get("filename"),
+            "doc_type": doc.get("doc_type"),
+            "document_category": doc.get("document_category"),
+            "source": doc.get("source", "USER"),
+            "hospital_id": doc.get("hospital_id"),
+            "ocr_status": doc.get("ocr_status"),
+            "created_at": doc.get("created_at"),
+            "download_url": download_url,
+        })
+
+    logger.info(
+        f"[PATIENT_DOCS] Hospital view returned {len(docs)} doc(s) "
+        f"user_id={user_id} hospital_id={hospital_id}"
+    )
+    return docs
+
+
+def list_documents_for_hospital(hospital_id: str) -> list[dict]:
+    """
+    Every document this hospital uploaded, across all patients — the hospital
+    dashboard view (as opposed to list_patient_docs_for_hospital, which is
+    scoped to one patient and also includes that patient's own uploads).
+
+    Uses the sparse hospital-index GSI (hospital_id -> created_at) on
+    MedilockerDocuments, so only source=HOSPITAL rows for this hospital are
+    ever returned — never another hospital's docs, and never patient
+    self-uploads. Newest first.
+    """
+    items: list[dict] = []
+    kwargs = {
+        "IndexName": "hospital-index",
+        "KeyConditionExpression": Key("hospital_id").eq(hospital_id),
+        "ScanIndexForward": False,
+    }
+    try:
+        while True:
+            response = DOCUMENTS_TABLE.query(**kwargs)
+            items.extend(response.get("Items", []))
+            last_key = response.get("LastEvaluatedKey")
+            if not last_key:
+                break
+            kwargs["ExclusiveStartKey"] = last_key
+    except ClientError as exc:
+        logger.error(
+            f"[PATIENT_DOCS] Hospital-wide query failed hospital_id={hospital_id}: {exc}"
+        )
+        raise HTTPException(status_code=500, detail="Failed to fetch hospital documents")
+
+    docs = []
+    for doc in items:
+        s3_key = doc.get("s3_original_key")
+        download_url = None
+        if s3_key:
+            try:
+                download_url = s3_client.generate_presigned_url(
+                    ClientMethod="get_object",
+                    Params={"Bucket": S3_BUCKET, "Key": s3_key},
+                    ExpiresIn=3600,
+                )
+            except ClientError as exc:
+                logger.warning(
+                    f"[PATIENT_DOCS] Presign failed for {s3_key}: {exc}"
+                )
+        docs.append({
+            "user_id": doc.get("user_id"),
+            "file_id": doc.get("file_id"),
+            "filename": doc.get("filename"),
+            "doc_type": doc.get("doc_type"),
+            "document_category": doc.get("document_category"),
+            "ocr_status": doc.get("ocr_status"),
+            "created_at": doc.get("created_at"),
+            "download_url": download_url,
+        })
+
+    logger.info(
+        f"[PATIENT_DOCS] Hospital-wide view returned {len(docs)} doc(s) "
+        f"hospital_id={hospital_id}"
+    )
+    return docs

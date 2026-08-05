@@ -14,7 +14,6 @@ Architecture:
     a message to the SQS OCR queue, and returns immediately with 202. The
     OCRWorkerLambda picks up the job and updates DynamoDB when done.
 """
-import base64
 import os
 from typing import Optional
 from uuid import uuid4
@@ -36,6 +35,11 @@ def upload_files(user_id: str, files):
     """
     Upload files for a user.
 
+    Args:
+        files: list of dicts {"filename": str, "content": bytes, "metadata": dict}
+               (already-read multipart file bytes — see
+               medilocker_router._read_upload_payloads).
+
     1. Validate file type and size.
     2. Generate short file_id (8-char UUID).
     3. Store original at {prefix}{user_id}/{file_id}/original.{ext}
@@ -44,8 +48,12 @@ def upload_files(user_id: str, files):
        response, so background threads may not complete).
     """
     for file in files:
+        filename = file["filename"]
+        file_binary = file["content"]
+        file_metadata = file["metadata"]
+
         # --- Validate file extension ---
-        _, ext = os.path.splitext(file.filename)
+        _, ext = os.path.splitext(filename)
         ext = ext.lstrip(".").lower()
         if not ext:
             ext = "bin"
@@ -56,12 +64,7 @@ def upload_files(user_id: str, files):
                        f"Accepted: {', '.join(sorted(ALLOWED_EXTENSIONS))}",
             )
 
-        try:
-            file_binary = base64.b64decode(file.content)
-        except base64.binascii.Error:
-            raise HTTPException(status_code=400, detail="Invalid base64 encoding")
-
-        # --- Validate decoded size ---
+        # --- Validate size ---
         if len(file_binary) > MAX_FILE_SIZE_BYTES:
             size_mb = len(file_binary) / (1024 * 1024)
             limit_mb = MAX_FILE_SIZE_BYTES / (1024 * 1024)
@@ -75,8 +78,8 @@ def upload_files(user_id: str, files):
         ocr_key = f"{S3_FOLDER_PREFIX}{user_id}/{file_id}/ocr.txt"
 
         # Upload original file to S3
-        s3_metadata = {k: str(v) for k, v in (file.metadata or {}).items()}
-        s3_metadata["filename"] = file.filename
+        s3_metadata = {k: str(v) for k, v in (file_metadata or {}).items()}
+        s3_metadata["filename"] = filename
         s3_client.put_object(
             Bucket=S3_BUCKET,
             Key=original_key,
@@ -86,16 +89,17 @@ def upload_files(user_id: str, files):
         logger.info(f"[UPLOAD] Stored original at s3://{S3_BUCKET}/{original_key}")
 
         # Insert DynamoDB metadata record (ocr_status = PENDING)
-        file_meta = {k: str(v) for k, v in (file.metadata or {}).items()}
+        file_meta = {k: str(v) for k, v in (file_metadata or {}).items()}
         doc_type = file_meta.get("file_type") or None
         doc_record = document_db_service.create_document_record({
             "user_id": user_id,
             "file_id": file_id,
-            "filename": file.filename,
+            "filename": filename,
             "doc_type": doc_type,
             "s3_original_key": original_key,
             "s3_ocr_key": ocr_key,
             "ocr_status": "PENDING",
+            "source": "USER",
             "file_metadata": file_meta or None,
         })
         created_at = doc_record["created_at"]
@@ -108,7 +112,7 @@ def upload_files(user_id: str, files):
             file_id=file_id,
             created_at=created_at,
             file_binary=file_binary,
-            filename=file.filename,
+            filename=filename,
             original_key=original_key,
             ocr_key=ocr_key,
         )
@@ -119,8 +123,13 @@ def upload_files_async(user_id: str, files):
     """
     Async upload — store files immediately, defer OCR to background worker.
 
+    Args:
+        files: list of dicts {"filename": str, "content": bytes, "metadata": dict}
+               (already-read multipart file bytes — see
+               medilocker_router._read_upload_payloads).
+
     Flow per file:
-      1. Validate file type (images + PDFs accepted) and decoded size.
+      1. Validate file type (images + PDFs accepted) and size.
       2. Store original at {prefix}{user_id}/{file_id}/original.{ext} in S3.
       3. Create DynamoDB record with ocr_status=PENDING, upload_mode=ASYNC.
       4. Send SQS message to OCRQueue → OCRWorkerLambda processes in background.
@@ -131,7 +140,11 @@ def upload_files_async(user_id: str, files):
     results = []
 
     for file in files:
-        _, ext = os.path.splitext(file.filename)
+        filename = file["filename"]
+        file_binary = file["content"]
+        file_metadata = file["metadata"]
+
+        _, ext = os.path.splitext(filename)
         ext = ext.lstrip(".").lower()
         if not ext:
             ext = "bin"
@@ -144,11 +157,6 @@ def upload_files_async(user_id: str, files):
                     f"Accepted: {', '.join(sorted(ASYNC_ALLOWED_EXTENSIONS))}"
                 ),
             )
-
-        try:
-            file_binary = base64.b64decode(file.content)
-        except base64.binascii.Error:
-            raise HTTPException(status_code=400, detail="Invalid base64 encoding")
 
         if len(file_binary) > MAX_FILE_SIZE_BYTES:
             size_mb = len(file_binary) / (1024 * 1024)
@@ -163,8 +171,8 @@ def upload_files_async(user_id: str, files):
         ocr_key = f"{S3_FOLDER_PREFIX}{user_id}/{file_id}/ocr.txt"
 
         # Store original file in S3
-        s3_metadata = {k: str(v) for k, v in (file.metadata or {}).items()}
-        s3_metadata["filename"] = file.filename
+        s3_metadata = {k: str(v) for k, v in (file_metadata or {}).items()}
+        s3_metadata["filename"] = filename
         s3_client.put_object(
             Bucket=S3_BUCKET,
             Key=original_key,
@@ -176,17 +184,18 @@ def upload_files_async(user_id: str, files):
         )
 
         # Create DynamoDB record — PENDING, upload_mode=ASYNC
-        file_meta = {k: str(v) for k, v in (file.metadata or {}).items()}
+        file_meta = {k: str(v) for k, v in (file_metadata or {}).items()}
         doc_type = file_meta.get("file_type") or None
         doc_record = document_db_service.create_document_record({
             "user_id": user_id,
             "file_id": file_id,
-            "filename": file.filename,
+            "filename": filename,
             "doc_type": doc_type,
             "s3_original_key": original_key,
             "s3_ocr_key": ocr_key,
             "ocr_status": "PENDING",
             "upload_mode": "ASYNC",
+            "source": "USER",
             "file_metadata": file_meta or None,
         })
         created_at = doc_record["created_at"]
@@ -196,7 +205,7 @@ def upload_files_async(user_id: str, files):
             user_id=user_id,
             file_id=file_id,
             s3_key=original_key,
-            filename=file.filename,
+            filename=filename,
             created_at=created_at,
         )
         logger.info(
@@ -206,7 +215,7 @@ def upload_files_async(user_id: str, files):
 
         results.append({
             "file_id": file_id,
-            "filename": file.filename,
+            "filename": filename,
             "status": "PENDING",
         })
 
@@ -428,7 +437,7 @@ def generate_download_link(user_id: str, file_id: str):
 
 def save_prescription_to_medilocker(
     user_id: str,
-    prescription_pdf_base64: str,
+    content_bytes: bytes,
     filename: Optional[str] = None,
 ) -> dict:
     """
@@ -441,14 +450,13 @@ def save_prescription_to_medilocker(
 
     Args:
         user_id: Patient's user ID (owner of the Medilocker)
-        prescription_pdf_base64: Base64-encoded PDF content
+        content_bytes: Raw PDF bytes (already read from the multipart upload)
         filename: Optional display filename
 
     Returns:
         dict with file_id and filename for the saved prescription
     """
     from datetime import datetime, timezone
-    import base64
 
     file_id = uuid4().hex[:8]
     now = datetime.now(timezone.utc)
@@ -456,7 +464,6 @@ def save_prescription_to_medilocker(
     time_str = now.strftime("%H%M")      # e.g. 1430
     time_full = now.strftime("%H:%M:%S") # e.g. 14:30:57
 
-    content_bytes = base64.b64decode(prescription_pdf_base64)
     size_bytes = len(content_bytes)
     if size_bytes >= 1024 * 1024:
         file_size_str = f"{size_bytes / (1024 * 1024):.2f} MB"
@@ -499,6 +506,7 @@ def save_prescription_to_medilocker(
         "ocr_status": "COMPLETED",
         "structured_status": "COMPLETED",
         "document_category": "PRESCRIPTION",
+        "source": "USER",
         "file_metadata": file_metadata,
     })
 

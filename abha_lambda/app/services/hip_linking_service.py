@@ -12,11 +12,14 @@ from HospitalAbdmConfig and passed to the ABDM gateway.
 
 Async callback handlers live in routers/webhook_router.py, not here.
 """
+import uuid
 from typing import List, Optional
 
+from app import config
+from app.utils.abha_number import to_abdm_digits
 from app.abdm import hip_client
 from app.abdm.schemas import CareContextPatient
-from app.services import hospital_abdm_service
+from app.services import hospital_abdm_service, abdm_transactions_service
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,7 +49,6 @@ def register_facility(
     hospital_id: str,
     facility_id: str,
     facility_name: str,
-    bridge_id: str,
     hip_name: str,
     service_type: str = "HIP",
     active: bool = True,
@@ -58,9 +60,13 @@ def register_facility(
     hip_name becomes the ABDM serviceId (X-HIP-ID) for this hospital.
     Must be ≤15 characters, alphanumeric, unique per bridge per facility.
 
+    bridge_id is Kokoro's ABDM client ID (config.ABDM_CLIENT_ID), not
+    supplied by the caller.
+
     We use hip_name as a temporary hip_id to call the facility registration
     endpoint (it's a one-time setup, not a patient-specific call).
     """
+    bridge_id = config.ABDM_CLIENT_ID
     logger.info(
         "[HIPLinkingService] Registering facility hospital_id=%s facilityId=%s bridgeId=%s",
         hospital_id, facility_id, bridge_id,
@@ -68,19 +74,26 @@ def register_facility(
     payload = {
         "facilityId":   facility_id,
         "facilityName": facility_name,
-        "bridgeId":     bridge_id,
-        "hipName":      hip_name,
-        "type":         service_type,
-        "active":       active,
+        "HRP": [
+            {
+                "bridgeId": bridge_id,
+                "hipName":  hip_name,
+                "type":     service_type,
+                "active":   active,
+            }
+        ],
     }
-    hip_client.post_facility(
+    abdm_response = hip_client.post_facility(
         "/v4/int/v1/bridges/MutipleHRPAddUpdateServices",
         payload,
         hip_id=hip_name,   # hipName == serviceId in ABDM
     )
+    logger.info("[HIPLinkingService] ABDM register_facility raw response: %s", abdm_response)
     logger.info("[HIPLinkingService] Facility registered with ABDM, saving to DB")
 
-    # Persist so all subsequent HIP API calls can look up hip_id by hospital_id
+    # Persist so all subsequent HIP/HIU API calls can look up hip_id/hiu_id by hospital_id.
+    # In the ABDM sandbox a single serviceId acts as both HIP and HIU, so we register
+    # hiu_id == hip_id; override later if a hospital is given a distinct HIU service id.
     hospital_abdm_service.save(
         hospital_id=hospital_id,
         facility_id=facility_id,
@@ -88,9 +101,39 @@ def register_facility(
         bridge_id=bridge_id,
         hip_name=hip_name,
         hip_id=hip_name,       # ABDM uses hipName as the serviceId
+        hiu_id=hip_name,       # same serviceId doubles as the HIU id (M3)
         abdm_status="registered",
     )
     logger.info("[HIPLinkingService] hospital_id=%s saved to HospitalAbdmConfig", hospital_id)
+
+
+# ---------------------------------------------------------------------------
+# 3.2.6  Find bridge by service ID (live ABDM query)
+# ---------------------------------------------------------------------------
+
+def find_bridge_by_service_id(service_id: str) -> dict:
+    """
+    Query ABDM for the bridge associated with the given service (HIP/HIU) ID.
+    Returns the raw ABDM response — no DB involved.
+    """
+    logger.info("[HIPLinkingService] Finding bridge for service_id=%s", service_id)
+    return hip_client.get_gateway(
+        f"/api/hiecm/gateway/v3/bridge-service/serviceId/{service_id}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 3.2.7  Find services by bridge ID (live ABDM query)
+# ---------------------------------------------------------------------------
+
+def find_services_by_bridge_id() -> dict:
+    """
+    Query ABDM for all services (HIP/HIU) registered under our bridge.
+    ABDM resolves the bridge from the bearer token — no bridgeId param exists.
+    Returns the raw ABDM response — no DB involved.
+    """
+    logger.info("[HIPLinkingService] Finding services for our bridge")
+    return hip_client.get_gateway("/api/hiecm/gateway/v3/bridge-services")
 
 
 # ---------------------------------------------------------------------------
@@ -104,12 +147,16 @@ def generate_link_token(
     year_of_birth: int,
     abha_address: Optional[str] = None,
     abha_number: Optional[str] = None,
-) -> None:
+) -> str:
     """
     Ask ABDM to generate a link token for the patient identified by abhaAddress
     or abhaNumber. Returns immediately (202). The actual token arrives via the
     4.3.2 callback at /api/v3/hip/token/on-generate-token where it is stored
     in AbhaAccounts scoped to this hospital's hip_id.
+
+    A PENDING row is recorded in AbdmTransactions (keyed by the REQUEST-ID we
+    send) so the callback can be correlated back to this request. The request_id
+    is returned to the caller for tracking.
 
     Either abha_address or abha_number must be provided.
     """
@@ -119,9 +166,11 @@ def generate_link_token(
     hospital = hospital_abdm_service.get_or_raise(hospital_id)
     hip_id   = hospital["hip_id"]
 
+    request_id = str(uuid.uuid4())
+
     logger.info(
-        "[HIPLinkingService] Generating link token hospital_id=%s hip_id=%s abha_address=%s",
-        hospital_id, hip_id, abha_address,
+        "[HIPLinkingService] Generating link token hospital_id=%s hip_id=%s abha_address=%s request_id=%s",
+        hospital_id, hip_id, abha_address, request_id,
     )
     payload = {
         "name":        name,
@@ -131,10 +180,37 @@ def generate_link_token(
     if abha_address:
         payload["abhaAddress"] = abha_address
     if abha_number:
-        payload["abhaNumber"] = abha_number
+        # ABDM link APIs want the bare 14-digit form, not the dashed display form.
+        payload["abhaNumber"] = to_abdm_digits(abha_number)
 
-    hip_client.post("/api/hiecm/v3/token/generate-token", payload, hip_id=hip_id)
-    logger.info("[HIPLinkingService] Link token generation request sent (202 accepted)")
+    # Record the request as PENDING before sending so the callback can correlate.
+    abdm_transactions_service.create_pending(
+        request_id=request_id,
+        api="generate-token",
+        hospital_id=hospital_id,
+        hip_id=hip_id,
+        abha_address=abha_address,
+        request_payload=payload,
+    )
+
+    try:
+        hip_client.post(
+            "/api/hiecm/v3/token/generate-token",
+            payload,
+            hip_id=hip_id,
+            request_id=request_id,
+        )
+    except Exception as e:
+        # Synchronous rejection (non-202) — no callback will ever arrive, so
+        # close the transaction now instead of leaving it PENDING forever.
+        abdm_transactions_service.mark_failed(request_id, error={"message": str(e)})
+        raise
+
+    logger.info(
+        "[HIPLinkingService] Link token generation request sent (202 accepted) request_id=%s",
+        request_id,
+    )
+    return request_id
 
 
 # ---------------------------------------------------------------------------
@@ -146,34 +222,64 @@ def link_care_context(
     abha_address: str,
     patient_records: List[CareContextPatient],
     link_token: str,
-    abha_number: Optional[str] = None,
-) -> None:
+) -> str:
     """
     Link one or more care contexts against the patient's ABHA address.
     Requires a valid link token (previously obtained via 4.3.1 → 4.3.2 callback).
     Returns immediately (202). Confirmation arrives via 4.3.4 callback at
     /api/v3/link/on_carecontext.
 
+    A PENDING row is recorded in AbdmTransactions (keyed by the REQUEST-ID we
+    send) so the 4.3.4 callback can be correlated. The request_id is returned.
+
+    The patient is identified by abhaAddress only — the same identity the link
+    token was minted against in 4.3.1. We deliberately do NOT send abhaNumber:
+    the link token is address-scoped, and adding an abhaNumber ABDM considers
+    inconsistent triggers "ABHA number mismatch with Link token". abha_number is
+    still used upstream (in the router) as the DB key to fetch the link token.
+
     link_token is passed as X-LINK-TOKEN header by hip_client.post().
     """
     hospital = hospital_abdm_service.get_or_raise(hospital_id)
     hip_id   = hospital["hip_id"]
 
+    request_id = str(uuid.uuid4())
+
     logger.info(
-        "[HIPLinkingService] Linking care context hospital_id=%s hip_id=%s abha_address=%s",
-        hospital_id, hip_id, abha_address,
+        "[HIPLinkingService] Linking care context hospital_id=%s hip_id=%s abha_address=%s request_id=%s",
+        hospital_id, hip_id, abha_address, request_id,
     )
     payload: dict = {
         "abhaAddress": abha_address,
         "patient":     [p.model_dump() for p in patient_records],
     }
-    if abha_number:
-        payload["abhaNumber"] = abha_number
 
-    hip_client.post(
-        "/api/hiecm/hip/v3/link/carecontext",
-        payload,
+    # Record the request as PENDING before sending so the callback can correlate.
+    abdm_transactions_service.create_pending(
+        request_id=request_id,
+        api="link-carecontext",
+        hospital_id=hospital_id,
         hip_id=hip_id,
-        link_token=link_token,
+        abha_address=abha_address,
+        request_payload=payload,
     )
-    logger.info("[HIPLinkingService] Care context link request sent (202 accepted)")
+
+    try:
+        hip_client.post(
+            "/api/hiecm/hip/v3/link/carecontext",
+            payload,
+            hip_id=hip_id,
+            link_token=link_token,
+            request_id=request_id,
+        )
+    except Exception as e:
+        # Synchronous rejection (non-202) — no callback will ever arrive, so
+        # close the transaction now instead of leaving it PENDING forever.
+        abdm_transactions_service.mark_failed(request_id, error={"message": str(e)})
+        raise
+
+    logger.info(
+        "[HIPLinkingService] Care context link request sent (202 accepted) request_id=%s",
+        request_id,
+    )
+    return request_id

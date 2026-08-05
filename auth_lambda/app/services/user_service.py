@@ -56,14 +56,16 @@ def get_user_by_id(user_id: str):
         return None
 
 
-def create_user_profile(user_data: dict, normalized_phone: str) -> dict:
+def create_user_profile(user_data: dict, normalized_phone: str, extra_fields: Optional[dict] = None) -> dict:
     """
     Create a new user profile.
-    
+
     Args:
         user_data: User data from request (name, email, etc.)
         normalized_phone: Normalized phone number
-        
+        extra_fields: Optional extra attributes to persist on the user item
+            (e.g. hospital_id / abha_number for ABHA-provisioned users)
+
     Returns:
         Created user profile dict
     """
@@ -80,15 +82,19 @@ def create_user_profile(user_data: dict, normalized_phone: str) -> dict:
         # "email": email.lower().strip(),  # Email is now mandatory
         "createdAt": now_iso,
     }
-    
+
     # Add optional fields if provided
     email = user_data.get("email")
     if email:
         user_item["email"] = email.lower().strip()
-    
+
     name = user_data.get("name")
     if name:
         user_item["name"] = name.strip()
+
+    # Merge any caller-supplied extra attributes (skip None values)
+    if extra_fields:
+        user_item.update({k: v for k, v in extra_fields.items() if v is not None})
 
     try:
         config.users_table.put_item(Item=user_item)

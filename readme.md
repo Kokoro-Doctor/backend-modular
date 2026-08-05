@@ -49,7 +49,7 @@ backend/
 │       ├── config.py
 │       ├── logger.py
 │       ├── models/
-│       ├── routers/       # medilocker_router, hospital_router
+│       ├── routers/       # medilocker_router
 │       ├── services/      # OCR, extraction, claims, prescriptions, …
 │       │   └── prompts/
 │       └── utils/

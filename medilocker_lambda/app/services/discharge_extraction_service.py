@@ -20,6 +20,7 @@ from app.config import (
     S3_BUCKET,
     S3_FOLDER_PREFIX,
     s3_client,
+    CLAIM_VALIDATOR_MODEL,
 )
 from app.logger import get_logger
 from app.services.ocr_service import extract_text_from_image, extract_text_from_pdf_s3
@@ -29,6 +30,8 @@ logger = get_logger(__name__)
 PDF_EXTENSIONS = {"pdf"}
 IMAGE_EXTENSIONS = ALLOWED_EXTENSIONS
 DISCHARGE_ALLOWED_EXTENSIONS = IMAGE_EXTENSIONS | PDF_EXTENSIONS
+
+MAX_CHARS_PER_DOC = 2000  # keeps requests under gpt-oss-20b's TPM limit
 
 
 def _is_pdf(filename: str) -> bool:
@@ -196,6 +199,9 @@ def extract_discharge_structured_data_from_text(
         <<<OCR_TEXT>>>
         """
 
+    if len(ocr_text) > MAX_CHARS_PER_DOC:
+        ocr_text = ocr_text[:MAX_CHARS_PER_DOC] + "\n[... document truncated for length ...]"
+
     messages = [
         {
             "role": "system",
@@ -212,9 +218,10 @@ def extract_discharge_structured_data_from_text(
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=messages,
+            model=CLAIM_VALIDATOR_MODEL,
+                        messages=messages,
             temperature=0.1,
+            max_tokens=3000,
             response_format={"type": "json_object"},
         )
         response_content = response.choices[0].message.content.strip()
@@ -309,9 +316,10 @@ def analyze_discharge_summary(
 
     try:
         response = client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=messages,
+            model=CLAIM_VALIDATOR_MODEL,
+                        messages=messages,
             temperature=0.1,
+            max_tokens=3000,
             response_format={"type": "json_object"},
         )
         response_content = response.choices[0].message.content.strip()

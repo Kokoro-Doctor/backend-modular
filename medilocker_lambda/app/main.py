@@ -2,7 +2,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from mangum import Mangum
-from app.routers import medilocker_router, hospital_router
+from app.routers import medilocker_router
 from app.logger import get_logger
 
 logger = get_logger(__name__)
@@ -45,7 +45,6 @@ async def custom_http_exception_handler(request: Request, exc: HTTPException):
 
 # Routers
 app.include_router(medilocker_router.router)
-app.include_router(hospital_router.router)
 
 # AWS Lambda handler
 handler = Mangum(app)

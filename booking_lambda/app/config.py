@@ -23,6 +23,5 @@ USER_DOCTOR_SUBSCRIPTIONS_TABLE = dynamodb.Table(os.environ.get("USER_DOCTOR_SUB
 # Users table (for patient import - get/create user by phone)
 USERS_TABLE = dynamodb.Table(os.environ.get("USERS_TABLE", "Users"))
 
-# User-Doctor relations table (persistent connectivity graph)
-USER_DOCTOR_RELATIONS_TABLE = dynamodb.Table(os.environ.get("USER_DOCTOR_RELATIONS_TABLE", "UserDoctorRelations"))
-
+# User-Doctor relation table (persistent connectivity graph)
+USER_DOCTOR_TABLE = dynamodb.Table(os.environ.get("USER_DOCTOR_TABLE", "UserDoctor"))
