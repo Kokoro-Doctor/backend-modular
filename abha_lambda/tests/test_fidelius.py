@@ -95,6 +95,34 @@ class TestFideliusVectors(unittest.TestCase):
                     v["plaintext"],
                 )
 
+    def test_x509_encoding_matches_reference(self):
+        """
+        Our SPKI must be byte-identical to the CLI's x509PublicKey.
+
+        This is what goes on the wire as dhPublicKey.keyValue — ABDM's HIU
+        parses it with X509EncodedKeySpec and rejects the raw point.
+        """
+        for v in self.vectors:
+            with self.subTest(v["description"]):
+                self.assertEqual(
+                    fidelius.to_x509_public_key(v["senderPublicKey"]),
+                    v["senderX509PublicKey"],
+                )
+                self.assertEqual(
+                    fidelius.to_x509_public_key(v["requesterPublicKey"]),
+                    v["requesterX509PublicKey"],
+                )
+                self.assertEqual(len(v["senderX509PublicKey"]), 412)
+
+    def test_x509_roundtrips_back_to_the_same_point(self):
+        for v in self.vectors:
+            with self.subTest(v["description"]):
+                spki = fidelius.to_x509_public_key(v["senderPublicKey"])
+                self.assertEqual(
+                    fidelius.load_public_key(spki),
+                    fidelius.load_public_key(v["senderPublicKey"]),
+                )
+
     def test_shared_secret_is_symmetric(self):
         for v in self.vectors:
             with self.subTest(v["description"]):
@@ -198,10 +226,21 @@ class TestDataEncryptionAdapter(unittest.TestCase):
         self.assertEqual(key_material["cryptoAlg"], "ECDH")
         self.assertEqual(key_material["curve"], "Curve25519")
         self.assertEqual(key_material["nonce"], nonce)
-        # The 88-char EC point, NOT an RFC 8410 X25519 SPKI (OID 1.3.101.110).
-        self.assertEqual(len(key_material["dhPublicKey"]["keyValue"]), 88)
-        self.assertFalse(key_material["dhPublicKey"]["keyValue"].startswith("MCowBQYDK2Vu"))
         self.assertTrue(private_key)
+
+        # keyValue must be the 412-char EC SubjectPublicKeyInfo. Both other
+        # encodings have been rejected by the live ABDM sandbox:
+        #   raw 88-char point -> "failed to construct sequence from byte[]"
+        #   X25519 SPKI       -> "algorithm identifier 1.3.101.110 not recognised"
+        key_value = key_material["dhPublicKey"]["keyValue"]
+        self.assertEqual(len(key_value), 412)
+        self.assertFalse(key_value.startswith("MCowBQYDK2Vu"))  # not X25519
+        self.assertTrue(key_value.startswith("MIIBMTCB6gYHKoZIzj0CAT"))  # id-ecPublicKey
+        # ...and it must still describe our own key pair.
+        self.assertEqual(
+            fidelius.compute_shared_secret(private_key, key_value),
+            fidelius.compute_shared_secret(private_key, key_value),
+        )
 
     def test_hip_push_decrypts_on_the_hiu_side(self):
         """Full 6.3.5 loop: HIU requests, HIP encrypts + pushes, HIU decrypts."""
@@ -279,6 +318,30 @@ class TestAgainstLiveCli(unittest.TestCase):
                 )["decryptedData"],
                 plaintext,
             )
+
+    def test_java_accepts_our_x509_key_value(self):
+        """
+        The exact path ABDM's HIU takes: feed our dhPublicKey.keyValue to Java's
+        X509EncodedKeySpec. Fidelius routes any non-88-char key there, so this
+        reproduces the parse that produced
+        "failed to construct sequence from byte[] Extra data detected in stream".
+        """
+        plaintext = '{"resourceType":"Bundle","id":"x509"}'
+        sender = self._cli(["gkm"])
+        _, _, key_material = __import__(
+            "app.abdm.data_encryption", fromlist=["x"]
+        ).generate_key_material()
+        key_value = key_material["dhPublicKey"]["keyValue"]
+        self.assertEqual(len(key_value), 412)
+
+        result = self._cli_file(
+            "e", plaintext, sender["nonce"], key_material["nonce"],
+            sender["privateKey"], key_value,
+        )
+        self.assertTrue(
+            result.get("encryptedData"),
+            "Java returned empty ciphertext — it could not parse our keyValue",
+        )
 
     def test_java_accepts_our_generated_key_material(self):
         plaintext = '{"resourceType":"Bundle","id":"ours"}'

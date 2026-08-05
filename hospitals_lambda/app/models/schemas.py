@@ -1,7 +1,9 @@
+import re
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from typing import Any, Dict, Optional
 
-from fastapi import File, Form, UploadFile
+from fastapi import File, Form, HTTPException, UploadFile
 
 
 class HospitalCreate(BaseModel):
@@ -48,8 +50,16 @@ class AddPatientRequest(BaseModel):
         None,
         description="Attending doctor; if set, must belong to the hospital in the JWT.",
     )
-    phone: str
+    phone: str = Field(..., min_length=8, max_length=15, description="Patient phone (E.164 or local digits)")
     name: str
+
+    @field_validator("phone")
+    @classmethod
+    def phone_digits_only(cls, v: str) -> str:
+        digits = re.sub(r"\D", "", v or "")
+        if len(digits) < 8 or len(digits) > 13:
+            raise ValueError("Phone number must contain 8-13 digits")
+        return v
     email: Optional[str] = None
     age: Optional[int] = Field(None, ge=0, le=150, description="Patient age in years")
     gender: Optional[str] = Field(None, max_length=64, description="Patient gender")
@@ -75,7 +85,7 @@ class AddPatientForm:
 
     def __init__(
         self,
-        phone: str = Form(..., description="Patient phone (E.164 or local digits)"),
+        phone: str = Form(..., min_length=8, max_length=15, description="Patient phone (E.164 or local digits)"),
         name: str = Form(...),
         doctor_id: Optional[str] = Form(None, description="Attending doctor; must belong to hospital"),
         email: Optional[str] = Form(None),
@@ -86,6 +96,9 @@ class AddPatientForm:
         hospital_bill: Optional[UploadFile] = File(None, description="Hospital bill (PDF or image)"),
         prescription: Optional[UploadFile] = File(None, description="Prescription (PDF or image)"),
     ):
+        digits = re.sub(r"\D", "", phone or "")
+        if len(digits) < 8 or len(digits) > 13:
+            raise HTTPException(status_code=400, detail="Phone number must contain 8-13 digits")
         self.phone = phone
         self.name = name
         self.doctor_id = (doctor_id or "").strip() or None

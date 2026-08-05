@@ -49,6 +49,10 @@ def acknowledge_consent_notify(
     Respond to the 6.3.1 consent callback. `notify_request_id` is the REQUEST-ID
     header from that callback and is echoed back as response.requestId so ABDM
     can correlate the acknowledgement.
+
+    ABDM never calls back on 6.3.2, so the outcome is logged and stamped onto the
+    consent artefact row (ack_status / ack_request_id / ack_at) — that row is the
+    only durable evidence the acknowledgement was made.
     """
     payload = {
         "acknowledgement": {
@@ -59,11 +63,27 @@ def acknowledge_consent_notify(
             "requestId": notify_request_id,
         },
     }
+    ack_request_id = str(uuid.uuid4())
     logger.info(
-        "[DataFlowService] Acknowledging consent notify consent_id=%s request_id=%s hip_id=%s",
-        consent_id, notify_request_id, hip_id,
+        "[DataFlowService] Acknowledging consent notify consent_id=%s notify_request_id=%s "
+        "ack_request_id=%s hip_id=%s",
+        consent_id, notify_request_id, ack_request_id, hip_id,
     )
-    hip_client.post(_ON_NOTIFY_PATH, payload, hip_id=hip_id, request_id=str(uuid.uuid4()))
+    try:
+        response = hip_client.post(
+            _ON_NOTIFY_PATH, payload, hip_id=hip_id, request_id=ack_request_id
+        )
+    except Exception as exc:
+        consent_service.mark_acknowledged(
+            consent_id, "FAILED", ack_request_id=ack_request_id, error=str(exc),
+        )
+        raise
+
+    logger.info(
+        "[DataFlowService] Consent notify acknowledged consent_id=%s ack_request_id=%s response=%s",
+        consent_id, ack_request_id, response,
+    )
+    consent_service.mark_acknowledged(consent_id, "OK", ack_request_id=ack_request_id)
 
 
 # ---------------------------------------------------------------------------
@@ -225,10 +245,10 @@ def handle_health_information_request(
       3. Push the encrypted entries to the HIU (6.3.5).
       4. Notify the CM that the transfer succeeded (6.3.6).
 
-    A transaction row keyed by transaction_id tracks the overall flow. If the
-    encryption module is still a stub (NotImplementedError) we stop after the
-    acknowledgement and leave the row PENDING — no data is pushed. Any other
-    failure notifies the CM with sessionStatus=FAILED and marks the row FAILED.
+    A transaction row keyed by transaction_id tracks the overall flow. The
+    acknowledgement (step 1) is sent before anything can fail, so ABDM always
+    gets a valid ack. Any failure after that notifies the CM with
+    sessionStatus=FAILED and marks the row FAILED.
     """
     abdm_transactions_service.create_pending(
         request_id=transaction_id,

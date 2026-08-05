@@ -59,6 +59,23 @@ _FIELD_BYTES = 32
 _NONCE_BYTES = 32
 _GCM_TAG_BITS = 128
 
+# DER SubjectPublicKeyInfo prefix for an EC key on this curve: the
+# AlgorithmIdentifier (OID 1.2.840.10045.2.1 id-ecPublicKey + the explicit
+# curve25519 domain parameters) followed by the BIT STRING header. Constant for
+# every key on the curve — only the trailing 65-byte point varies — so an SPKI
+# is this prefix plus 0x04||X||Y. Verified byte-identical to the x509PublicKey
+# the Fidelius CLI emits (tests/test_fidelius.py).
+_SPKI_PREFIX = bytes.fromhex(
+    "308201313081ea06072a8648ce3d02013081de020101302b06072a8648ce3d0101"
+    "02207fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    "ed304404202aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa984"
+    "914a14404207b425ed097b425ed097b425ed097b425ed097b425ed097b4260b5e9c"
+    "7710c8640441042aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    "aaaaaad245a20ae19a1b8a086b4e01edd2c7748d14c923d4d7e6d7c61b229e9c5a2"
+    "7eced3d902201000000000000000000000000000000014def9dea2f79cd65812631"
+    "a5cf5d3ed020108034200"
+)
+
 
 # ---------------------------------------------------------------------------
 # Curve arithmetic (affine; see module note in the README about constant time)
@@ -162,8 +179,29 @@ def generate_key_material() -> dict:
     return {
         "privateKey": _b64e(private),
         "publicKey": _b64e(public),
+        "x509PublicKey": _b64e(_SPKI_PREFIX + public),
         "nonce": _b64e(os.urandom(_NONCE_BYTES)),
     }
+
+
+def to_x509_public_key(public_key_b64: str) -> str:
+    """
+    Re-encode a raw SEC1 point as a DER SubjectPublicKeyInfo (412 base64 chars).
+
+    ABDM's HIU parses dhPublicKey.keyValue with X509EncodedKeySpec
+    unconditionally, so the raw 88-char point it fails with:
+        "failed to construct sequence from byte[] Extra data detected in stream"
+    Send this instead. (Fidelius CLI itself accepts either, switching on the
+    base64 length, but the live sandbox does not.)
+    """
+    point = load_public_key(public_key_b64)
+    if len(point) != 65:
+        point = _encode_point(_decode_point(point))
+    return _b64e(_SPKI_PREFIX + point)
+
+
+def _encode_point(point) -> bytes:
+    return b"\x04" + point[0].to_bytes(32, "big") + point[1].to_bytes(32, "big")
 
 
 def load_public_key(public_key_b64: str) -> bytes:

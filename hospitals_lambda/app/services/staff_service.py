@@ -50,7 +50,13 @@ def _phone_tail(phone: str) -> str:
 # ---------------------------------------------------------------------------
 
 def normalize_phone_number(phone: str) -> str:
-    """Normalize phone number to E.164 format."""
+    """Normalize phone number to E.164 format.
+
+    Strict by design: an Indian mobile number is always exactly 10 local
+    digits. Anything that doesn't unambiguously resolve to that (wrong digit
+    count, mistyped country code, etc.) is rejected rather than guessed at,
+    truncated, or padded.
+    """
     if not phone:
         return ""
     trimmed = phone.strip()
@@ -61,33 +67,24 @@ def normalize_phone_number(phone: str) -> str:
         return ""
 
     if trimmed.startswith("+"):
-        normalized = "+" + digits_only
-        if len(normalized) < 8 or len(normalized) > 18:
-            return ""
         if digits_only.startswith("91"):
-            if len(digits_only) == 12:
-                return normalized
-            if len(digits_only) == 11:
-                return f"+91{digits_only[-10:]}"
-            if len(digits_only) == 10:
-                return f"+91{digits_only}"
-        return normalized
+            local = digits_only[2:]
+        else:
+            local = digits_only
+        if len(local) != 10:
+            return ""
+        return f"+91{local}"
 
-    if len(digits_only) == 10:
-        return f"{SMS_COUNTRY_CODE}{digits_only}"
     if len(digits_only) == 12 and digits_only.startswith("91"):
-        return f"+{digits_only}"
-    if len(digits_only) == 11 and digits_only.startswith("91"):
-        return f"{SMS_COUNTRY_CODE}{digits_only[-10:]}"
-    if len(digits_only) > 12:
-        last_12 = digits_only[-12:]
-        if last_12.startswith("91"):
-            return f"+{last_12}"
-        return f"{SMS_COUNTRY_CODE}{digits_only[-10:]}"
-    if len(digits_only) < 10:
+        local = digits_only[2:]
+        return f"+91{local}"
+    if len(digits_only) == 11 and digits_only.startswith("0"):
+        # Trunk-prefix format, e.g. "0" + 10-digit mobile number
+        local = digits_only[1:]
+        return f"{SMS_COUNTRY_CODE}{local}"
+    if len(digits_only) != 10:
         return ""
-
-    return f"{SMS_COUNTRY_CODE}{digits_only[-10:]}"
+    return f"{SMS_COUNTRY_CODE}{digits_only}"
 
 
 # ---------------------------------------------------------------------------

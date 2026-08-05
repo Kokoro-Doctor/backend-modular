@@ -1,0 +1,101 @@
+<svg width="680" viewBox="0 0 680 1070" xmlns="http://www.w3.org/2000/svg" font-family="Arial, Helvetica, sans-serif">
+<title>LangGraph LLD for insurance pre-auth and mediclaim flow</title>
+<desc>Low-level design of the claim_validator_graph LangGraph pipeline showing per-node state reads and writes, external calls to S3, Textract, Groq and the ICD-10 database, and the two entry points.</desc>
+<defs>
+<marker id="ah" markerWidth="9" markerHeight="9" refX="7" refY="4" orient="auto"><path d="M1,1 L7,4 L1,7" fill="none" stroke="#888780" stroke-width="1.5"/></marker>
+<style>
+text{fill:#2C2C2A}
+.th{font-size:14px;font-weight:600}
+.tt{font-size:12px;font-weight:600}
+.ts{font-size:11.5px;font-weight:400}
+.mono{font-family:"SF Mono",Menlo,Consolas,monospace}
+.arr{stroke:#888780;stroke-width:1.5;fill:none}
+.gray{fill:#F1EFE8;stroke:#5F5E5A}
+.blue{fill:#E6F1FB;stroke:#185FA5}
+.teal{fill:#E1F5EE;stroke:#0F6E56}
+.purple{fill:#EEEDFE;stroke:#534AB7}
+.amber{fill:#FAEEDA;stroke:#854F0B}
+rect{stroke-width:1.5}
+.in{fill:#185FA5}
+.ext{fill:#854F0B}
+.out{fill:#0F6E56}
+</style>
+</defs>
+
+<text class="th" x="40" y="34">LangGraph LLD · claim_validator_graph.py</text>
+<text class="ts" x="40" y="52" fill="#5F5E5A">state = ClaimValidationState (TypedDict) · timings merged via reducer · Groq via OpenAI client (base_url)</text>
+
+<rect class="gray" x="90" y="66" width="500" height="60" rx="8"/><text class="tt" x="340" y="90" text-anchor="middle">Entry · validate_claim(documents, filenames)</text><text class="ts" x="340" y="110" text-anchor="middle">builds initial state → graph.invoke(initial_state)</text>
+<line class="arr" x1="340" y1="126" x2="340" y2="148" marker-end="url(#ah)"/>
+
+<rect class="blue" x="90" y="150" width="500" height="86" rx="8"/><text class="tt" x="104" y="172">ocr_extractor</text>
+<text class="ts in" x="104" y="192">in: documents, filenames</text>
+<text class="ts ext" x="104" y="210">ext: ThreadPool per doc → S3 temp (PDF) → AWS Textract</text>
+<text class="ts out" x="104" y="228">out: ocr_texts{doc_type: text}, timings.ocr</text>
+<line class="arr" x1="340" y1="236" x2="340" y2="258" marker-end="url(#ah)"/>
+
+<rect class="gray" x="200" y="260" width="280" height="52" rx="8"/><text class="tt" x="340" y="282" text-anchor="middle">after_ocr (conditional edge)</text><text class="ts" x="340" y="300" text-anchor="middle mono">'claim_form' in ocr_texts ?</text>
+
+<path class="arr" d="M200,290 C120,320 167,326 167,352" marker-end="url(#ah)"/>
+<path class="arr" d="M480,290 C560,320 512,326 512,352" marker-end="url(#ah)"/>
+<text class="ts" x="150" y="332" text-anchor="middle" fill="#0F6E56">yes</text>
+<text class="ts" x="530" y="332" text-anchor="middle" fill="#534AB7">no</text>
+
+<text class="th" x="167" y="348" text-anchor="middle" fill="#0F6E56">Audit path · mediclaim</text>
+<text class="th" x="512" y="348" text-anchor="middle" fill="#534AB7">Autofill path · pre-auth</text>
+
+<rect class="teal" x="30" y="360" width="275" height="90" rx="8"/><text class="tt" x="44" y="382">claim_field_extractor</text>
+<text class="ts in" x="44" y="401">in: ocr_texts['claim_form']</text>
+<text class="ts ext" x="44" y="418">ext: Groq · llama-4-scout (JSON)</text>
+<text class="ts out" x="44" y="435">out: structured_data</text>
+<line class="arr" x1="167" y1="450" x2="167" y2="470" marker-end="url(#ah)"/>
+
+<rect class="teal" x="30" y="472" width="275" height="90" rx="8"/><text class="tt" x="44" y="494">policy_router</text>
+<text class="ts in" x="44" y="513">in: structured_data</text>
+<text class="ts ext" x="44" y="530">logic: detect_policy_baseline() markers</text>
+<text class="ts out" x="44" y="547">out: policy_baseline, policy_type</text>
+<line class="arr" x1="167" y1="562" x2="167" y2="582" marker-end="url(#ah)"/>
+
+<rect class="teal" x="30" y="584" width="275" height="90" rx="8"/><text class="tt" x="44" y="606">cross_doc_analyzer</text>
+<text class="ts in" x="44" y="625">in: structured_data + supporting docs</text>
+<text class="ts ext" x="44" y="642">ext: Groq LLM · self-skips if no docs</text>
+<text class="ts out" x="44" y="659">out: cross_doc_findings</text>
+<line class="arr" x1="167" y1="674" x2="167" y2="694" marker-end="url(#ah)"/>
+
+<rect class="teal" x="30" y="696" width="275" height="122" rx="8"/><text class="tt" x="44" y="718">claim_auditor</text>
+<text class="ts in" x="44" y="737">in: structured + policy + cross_doc</text>
+<text class="ts ext" x="44" y="754">ext: Groq CoT (8192) + lookup_icd_code()</text>
+<text class="ts ext" x="44" y="771">+ calculate_deduction_risk() [DEDUCTION_RULES]</text>
+<text class="ts" x="44" y="788" fill="#5F5E5A">py: build_report_from_audit() (no LLM)</text>
+<text class="ts out" x="44" y="807">out: audit_results, thinking_trace, final_report</text>
+
+<rect class="purple" x="345" y="360" width="290" height="100" rx="8"/><text class="tt" x="359" y="382">multi_doc_extractor</text>
+<text class="ts in" x="359" y="401">in: ocr_texts (all docs, labelled)</text>
+<text class="ts ext" x="359" y="418">ext: Groq LLM (JSON)</text>
+<text class="ts ext" x="359" y="435">+ lookup_icd_code() [ICD-10 DB]</text>
+<text class="ts out" x="359" y="452">out: autofill_extracted</text>
+<line class="arr" x1="490" y1="460" x2="490" y2="482" marker-end="url(#ah)"/>
+
+<rect class="purple" x="345" y="484" width="290" height="118" rx="8"/><text class="tt" x="359" y="506">claim_form_filler</text>
+<text class="ts in" x="359" y="525">in: autofill_extracted</text>
+<text class="ts ext" x="359" y="542">ext: Groq LLM (JSON)</text>
+<text class="ts ext" x="359" y="559">+ lookup_icd_code() [ICD-10 DB]</text>
+<text class="ts" x="359" y="576" fill="#5F5E5A">py: billing totals math (Medi Assist form)</text>
+<text class="ts out" x="359" y="593">out: autofill_result</text>
+
+<path class="arr" d="M167,818 C167,850 250,858 288,858" marker-end="url(#ah)"/>
+<path class="arr" d="M490,602 C490,830 430,858 392,858" marker-end="url(#ah)"/>
+
+<rect class="gray" x="290" y="838" width="100" height="40" rx="20"/><text class="th" x="340" y="863" text-anchor="middle">END</text>
+
+<rect class="amber" x="30" y="906" width="620" height="66" rx="8"/><text class="tt" x="44" y="928">Pipeline 2 · autofill_from_stored_docs(user_id) — SKIPS ocr_extractor</text>
+<text class="ts" x="44" y="947">fetch_stored_ocr_for_user() reads pre-OCR'd text from DynamoDB (MedilockerDocuments) + S3,</text>
+<text class="ts" x="44" y="963">then calls multi_doc_extractor() → claim_form_filler() directly (flow = "stored_autofill").</text>
+
+<text class="ts" x="40" y="998" fill="#5F5E5A">Legend:</text>
+<text class="ts in" x="90" y="998">in = reads state</text>
+<text class="ts ext" x="205" y="998">ext = external / helper call</text>
+<text class="ts out" x="375" y="998">out = writes state</text>
+<text class="ts" x="490" y="998" fill="#5F5E5A">py = pure-Python (no LLM)</text>
+<text class="ts" x="40" y="1018" fill="#5F5E5A">External systems: AWS Textract · S3 · Groq (OpenAI-compatible) · ICD-10 DB · DynamoDB (Pipeline 2)</text>
+</svg>

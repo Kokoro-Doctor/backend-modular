@@ -49,8 +49,13 @@ def generate_key_material() -> Tuple[str, str, dict]:
         persist private_key_b64 + nonce_b64 if it needs to decrypt later
         (HIU flow); for the HIP encrypt flow they are used immediately.
 
-    `keyValue` is the 65-byte uncompressed EC point (88 base64 chars) that
-    ABDM's BouncyCastle stack expects — see the OID note in fidelius.py.
+    `keyValue` is the DER SubjectPublicKeyInfo (412 base64 chars), NOT the raw
+    88-char EC point. ABDM's HIU feeds this field straight to Java's
+    X509EncodedKeySpec, so the bare point is rejected with
+    "failed to construct sequence from byte[] Extra data detected in stream".
+    See the OID / encoding notes in fidelius.py — both wire formats have been
+    rejected by the live sandbox for different reasons, and this is the one it
+    accepts.
     """
     material = fidelius.generate_key_material()
 
@@ -60,7 +65,7 @@ def generate_key_material() -> Tuple[str, str, dict]:
         "dhPublicKey": {
             "expiry": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
             "parameters": PARAMETERS,
-            "keyValue": material["publicKey"],
+            "keyValue": material["x509PublicKey"],
         },
         "nonce": material["nonce"],
     }

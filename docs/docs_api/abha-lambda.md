@@ -1728,7 +1728,28 @@ Triggered after Phase 2 linking is complete. The patient approves a consent requ
 
 **Data stored:** The full consent artefact from step 14 is persisted in the **ConsentArtefacts** DynamoDB table keyed by `consentId`. This is needed because step 16 only sends the `consentId` — without the stored artefact Kokoro wouldn't know which care context references to push.
 
-**Encryption note:** The FHIR bundle encryption (step 18) uses ECDH Curve25519 + AES-GCM with the HIU's public key from step 16. As of the Milestone 3 work the encryption module (`app/abdm/data_encryption.py`) is **fully implemented** (X25519 ECDH → HKDF-SHA256 → AES-256-GCM, SHA-256 checksum) and is shared with the HIU receive path. The remaining placeholder is `_build_fhir_bundle()` in `data_flow_service.py`, which still emits a structurally-empty bundle — the push now completes cryptographically but the clinical FHIR content is not yet assembled from Kokoro's records.
+**Encryption note:** The FHIR bundle encryption (step 18) uses ECDH Curve25519 + AES-GCM with the HIU's public key from step 16. It is implemented in two layers and shared with the HIU receive path:
+
+- `app/abdm/fidelius.py` — the crypto primitive, a pure-Python port of ABDM's reference implementation [Fidelius CLI](https://github.com/mgrmtech/fidelius-cli) (kept at `backend/tools/fidelius-cli`). Validated byte-for-byte against that CLI by `abha_lambda/tests/test_fidelius.py`.
+- `app/abdm/data_encryption.py` — the ABDM protocol adapter (`keyMaterial`, `entries`, checksums).
+
+⚠️ **This is NOT RFC 7748 X25519**, despite the `"curve": "Curve25519"` in `keyMaterial`. ABDM uses BouncyCastle's `ECDH` over the named curve `curve25519` — i.e. curve25519 in **short-Weierstrass** form, with an unclamped scalar and classic EC point multiplication. The two produce different shared secrets and different wire encodings. See "Wire format gotchas" below.
+
+Scheme: EC ECDH → shared secret (32-byte X coordinate) → `xor = ourNonce XOR theirNonce`, `salt = xor[:20]`, `iv = xor[-12:]` → HKDF-SHA256(shared, salt, len=32) → AES-256-GCM (128-bit tag). Note the IV comes from the nonces, **not** from the HKDF, and the salt is 20 bytes, not 32.
+
+**The remaining placeholder is `_build_fhir_bundle()`** in `data_flow_service.py`, which still emits a structurally-empty bundle — the push completes cryptographically but the clinical FHIR content is not yet assembled from Kokoro's records.
+
+#### Wire format gotchas (`dhPublicKey.keyValue`)
+
+ABDM's HIU parses this field with Java's `X509EncodedKeySpec` **unconditionally**. Both other encodings were rejected by the live sandbox:
+
+| What we send | Bytes | ABDM's response |
+|---|---|---|
+| RFC 8410 X25519 SPKI | 44 | `400 — algorithm identifier 1.3.101.110 in key not recognised` |
+| Raw EC point `04\|\|X\|\|Y` (88 chars) | 65 | `400 — failed to construct sequence from byte[] Extra data detected in stream` |
+| **EC SubjectPublicKeyInfo (412 chars)** ✅ | 309 | accepted |
+
+So Kokoro **sends** the 412-char SPKI (`id-ecPublicKey`, OID 1.2.840.10045.2.1, with explicit curve params). Inbound, `fidelius.load_public_key()` accepts the 88-char point, the 412-char SPKI, or a compressed point, since we don't control what a counterparty sends.
 
 ---
 
@@ -1929,9 +1950,11 @@ Kokoro pushes the encrypted FHIR records directly to the HIU's `dataPushUrl` fro
 
 **Service call:** `hip_client.post_to_url(data_push_url, payload, hip_id=hip_id, request_id=<new UUID>)`
 
-**Encryption:** ECDH Curve25519 key exchange against the HIU's public key from step 16. Each FHIR bundle is AES-GCM encrypted. The HIP's own ephemeral public key + nonce (`keyMaterial`) is sent alongside so the HIU can derive the same shared secret and decrypt.
+**Encryption:** ECDH over BouncyCastle's short-Weierstrass `curve25519` (**not** RFC 7748 X25519 — see the encryption note at the top of Phase 3) against the HIU's public key from step 16. Each FHIR bundle is AES-256-GCM encrypted. The HIP's own ephemeral public key + nonce (`keyMaterial`) is sent alongside so the HIU can derive the same shared secret and decrypt.
 
-> **Current status:** The encryption module (`app/abdm/data_encryption.py`) is now implemented (real X25519 ECDH + AES-256-GCM). The push therefore completes and the `AbdmTransactions` row reaches `COMPLETED`. **Caveat:** until `_build_fhir_bundle()` is replaced with real clinical-record assembly, the encrypted payload contains a placeholder (empty) FHIR bundle — wire it to Kokoro's clinical store before certification.
+A fresh key pair + nonce is generated **per push session** and never reused. The scheme derives a single (AES key, IV) per session and reuses it across every entry in that push — ABDM's design, safe only because the key material is ephemeral.
+
+> **Current status:** Encryption is implemented and validated against ABDM's reference CLI. **Caveat:** until `_build_fhir_bundle()` is replaced with real clinical-record assembly, the encrypted payload contains a placeholder (empty) FHIR bundle — wire it to Kokoro's clinical store before certification.
 
 **Body Kokoro sends to HIU:**
 
@@ -1954,12 +1977,14 @@ Kokoro pushes the encrypted FHIR records directly to the HIU's `dataPushUrl` fro
     "dhPublicKey": {
       "expiry": "2026-01-01T00:00:00.000Z",
       "parameters": "Curve25519/32byte random key",
-      "keyValue": "<base64 HIP ephemeral public key>"
+      "keyValue": "MIIBMTCB6gYHKoZIzj0CATCB3gIBATArBgcqhkjOPQEBAiB/...  (412 chars)"
     },
-    "nonce": "<base64 HIP nonce>"
+    "nonce": "<base64 HIP nonce, 32 bytes>"
   }
 }
 ```
+
+> `keyValue` **must** be the 412-char DER SubjectPublicKeyInfo, not the raw 88-char EC point — ABDM rejects the latter with `failed to construct sequence from byte[]`. See "Wire format gotchas" in the Phase 3 encryption note.
 
 **HIU responds:** `202 Accepted`
 
@@ -2072,7 +2097,7 @@ Kokoro acts as **HIU** on a hospital's behalf: it asks a patient for consent, th
 - Phase 0 done (hospital registered via `register-facility`; bridge URL set). Registration now stores `hiu_id` (= `hip_id` in sandbox) so the hospital can act as HIU.
 - `KOKORO_WEBHOOK_BASE_URL` env var **must be set** to Kokoro's public base URL — it is used to build the `dataPushUrl` ABDM hands to the source HIP. Without it, `health-information/request` returns `400`.
 
-**State tables:** `HiuConsentRequests` (consent lifecycle, keyed by `request_id`, GSI on `consent_request_id`) and `HiuDataRequests` (data request + the ephemeral X25519 private key used to decrypt the inbound push, keyed by `request_id`, GSI on `transaction_id`). Fetched artefacts are stored in the shared `ConsentArtefacts` table.
+**State tables:** `HiuConsentRequests` (consent lifecycle, keyed by `request_id`, GSI on `consent_request_id`) and `HiuDataRequests` (data request + the ephemeral curve25519 private key used to decrypt the inbound push, keyed by `request_id`, GSI on `transaction_id`). Fetched artefacts are stored in the shared `ConsentArtefacts` table.
 
 **How it works:** You call the four outbound endpoints below; ABDM drives the five inbound callbacks automatically (Kokoro stores state, acknowledges, decrypts, and notifies the CM). Monitor with the `GET` inspection endpoints.
 
@@ -2296,7 +2321,7 @@ REQUEST-ID: <generated request_id returned by this wrapper>
       "dhPublicKey": {
         "expiry": "<generated public-key expiry>",
         "parameters": "Curve25519/32byte random key",
-        "keyValue": "<Base64 Kokoro ephemeral X25519 public key>"
+        "keyValue": "<Kokoro ephemeral public key, 412-char DER SubjectPublicKeyInfo>"
       },
       "nonce": "<Base64 Kokoro nonce>"
     }
@@ -2317,7 +2342,7 @@ Kokoro generates `keyMaterial`; the caller cannot supply it. Kokoro persists the
 }
 ```
 
-**What Kokoro does:** generates an ephemeral X25519 key pair, persists the **private** key in `HiuDataRequests` keyed by `request_id`, sends ABDM our **public** key + the `dataPushUrl` (`{KOKORO_WEBHOOK_BASE_URL}/api/v3/hiu/health-information/transfer`). Returns `request_id`.
+**What Kokoro does:** generates an ephemeral curve25519 key pair (see the Phase 3 encryption note — this is BouncyCastle short-Weierstrass `curve25519`, not RFC 7748 X25519), persists the **private** key in `HiuDataRequests` keyed by `request_id`, sends ABDM our **public** key + the `dataPushUrl` (`{KOKORO_WEBHOOK_BASE_URL}/api/v3/hiu/health-information/transfer`). Returns `request_id`.
 
 ---
 

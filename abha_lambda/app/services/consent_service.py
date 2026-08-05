@@ -117,6 +117,49 @@ def save(
     )
 
 
+def mark_acknowledged(
+    consent_id: str,
+    ack_status: str,
+    ack_request_id: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    """
+    Record the outcome of the 6.3.2 on-notify acknowledgement on the artefact row.
+
+    6.3.2 is fire-and-forget (ABDM never calls back), so without this there is no
+    durable trace that we acknowledged a consent at all. `ack_status` is "OK" once
+    ABDM accepts the POST, "FAILED" otherwise; `ack_request_id` is the REQUEST-ID
+    header we sent on that POST, which is what ABDM support will ask for.
+
+    Best-effort: never raises, so a bookkeeping failure can't mask the real
+    outcome of the acknowledgement itself.
+    """
+    fields = {
+        "ack_status":     ack_status,
+        "ack_request_id": ack_request_id,
+        "ack_error":      error,
+        "ack_at":         _now().isoformat(),
+    }
+    fields = {k: v for k, v in fields.items() if v is not None}
+
+    try:
+        config.consent_artefacts_table.update_item(
+            Key={"consent_id": consent_id},
+            UpdateExpression="SET " + ", ".join(f"#{k} = :{k}" for k in fields),
+            ExpressionAttributeNames={f"#{k}": k for k in fields},
+            ExpressionAttributeValues={f":{k}": v for k, v in fields.items()},
+        )
+        logger.info(
+            "[ConsentService] consent_id=%s ack_status=%s ack_request_id=%s",
+            consent_id, ack_status, ack_request_id,
+        )
+    except Exception:
+        logger.exception(
+            "[ConsentService] failed to record ack outcome consent_id=%s ack_status=%s",
+            consent_id, ack_status,
+        )
+
+
 def update_status(consent_id: str, status: str) -> None:
     """Update only the status (e.g. GRANTED → REVOKED on a later callback)."""
     config.consent_artefacts_table.update_item(
