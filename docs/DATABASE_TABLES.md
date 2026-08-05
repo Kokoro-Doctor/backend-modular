@@ -389,6 +389,140 @@ User chat logs for AI assistant. Table name configurable via `DYNAMODB_TABLE` in
 
 ---
 
+## Relations (patient ↔ doctor ↔ hospital)
+
+Three junction tables model the many-to-many links between patients, doctors and
+hospitals. All follow the same shape: a composite key one way, and a GSI for the
+reverse lookup.
+
+### UserHospital
+
+Patient ↔ hospital membership. ABHA signup links a user here.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| hospital_id | S | PK | |
+| user_id | S | SK | |
+
+**GSI:** `GSI_UserHospitals` (PK: user_id, SK: hospital_id) — "which hospitals is this patient in?"
+
+### DoctorHospital
+
+Doctor ↔ hospital affiliation.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| hospital_id | S | PK | |
+| doctor_id | S | SK | |
+
+**GSI:** `GSI_DoctorHospitals` (PK: doctor_id, SK: hospital_id) — "which hospitals does this doctor work at?"
+
+### UserDoctorRelations *(legacy)*
+
+⚠️ **Legacy — do not write new relations here.** Superseded by `UserDoctor`.
+Still read by `BookingLambda` via `USER_DOCTOR_RELATIONS_TABLE`. The
+`backfill_relations.py` script migrates rows from this table into `UserDoctor`
+(see [SCRIPTS.md](SCRIPTS.md)).
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| relation_id | S | PK | |
+
+**GSIs:** `GSI_UserRelations` (PK: user_id, SK: doctor_id), `GSI_DoctorRelations` (PK: doctor_id, SK: user_id)
+
+---
+
+## ABDM / ABHA
+
+Tables backing the ABDM integration. See [ABDM_INTEGRATION.md](ABDM_INTEGRATION.md)
+for how they fit together.
+
+### AbhaAccounts
+
+ABHA identity plus server-side ABDM tokens. Clients never hold an ABHA token —
+it is resolved from here per request.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| abha_number | S | PK | ABHA number |
+| abha_address | S | GSI | ABHA address (`name@sbx`) |
+| kokoro_user_id | S | GSI | Link back to the Kokoro user |
+
+**GSIs:** `kokoro_user_id-index`, `abha_address-index`
+
+> ⚠️ The `kokoro_user_id` attribute is **never written** by current code, so that
+> GSI returns nothing. Known gap — [ABDM_INTEGRATION.md](ABDM_INTEGRATION.md) §2.
+
+### HospitalAbdmConfig
+
+Maps a Kokoro hospital to its ABDM HIP/HIU service ids. This is what makes one
+ABDM client id serve many hospitals — the per-request `X-HIP-ID` is resolved here.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| hospital_id | S | PK | |
+| hip_id | S | GSI | ABDM HIP service id |
+| hiu_id | S | GSI | ABDM HIU service id (set equal to `hip_id` at registration) |
+
+**GSIs:** `hip_id-index`, `hiu_id-index`
+
+### AbdmTransactions
+
+Correlation log for asynchronous ABDM flows. Every request that expects a
+callback is recorded here by `request_id`; the callback carries
+`response.requestId` to match against. Inspect via `GET /abha/transactions`.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| request_id | S | PK | Correlation id |
+| hip_id | S | GSI | |
+| abha_address | S | GSI | |
+| created_at | S | GSI SK | |
+| ttl | N | TTL | Expiry, `ABDM_TRANSACTION_TTL_DAYS` (90) |
+
+**GSIs:** `hip_id-index` (SK: created_at), `abha_address-index` (SK: created_at)
+
+### ConsentArtefacts
+
+HIP-side consent artefacts granted by patients.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| consent_id | S | PK | |
+| ttl | N | TTL | |
+
+### HiuConsentRequests
+
+HIU-side consent requests Kokoro raises against other providers.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| request_id | S | PK | |
+| consent_request_id | S | GSI | Id assigned by the consent manager |
+| hiu_id | S | GSI | |
+| created_at | S | GSI SK | |
+| ttl | N | TTL | |
+
+**GSIs:** `consent_request_id-index`, `hiu_id-index` (SK: created_at)
+
+### HiuDataRequests
+
+HIU-side health-information requests and the ephemeral key material used to
+decrypt incoming data.
+
+| Attribute | Type | Key | Description |
+|-----------|------|-----|-------------|
+| request_id | S | PK | |
+| transaction_id | S | GSI | Matches the transfer callback |
+| ttl | N | TTL | |
+
+**GSI:** `transaction_id-index`
+
+> ⚠️ Stores the **ephemeral X25519 private key unwrapped**. Should be KMS-wrapped
+> at rest — [ABDM_INTEGRATION.md](ABDM_INTEGRATION.md) §3.
+
+---
+
 ## Other Storage (S3)
 
 ### Medilocker
@@ -400,4 +534,6 @@ User medical documents stored in S3. Metadata in DynamoDB `MedilockerDocuments`.
 | Bucket | `kokoro-doctor` (configurable via `S3_BUCKET`) |
 | Path | `Medilocker/Users/{user_id}/{file_id}/original.{ext}` |
 
-Used for upload, list, download, prescription generation. See `backend/medilocker_lambda/docs/MEDILOCKER_STORAGE_AND_FETCH.md` for details.
+Used for upload, list, download, prescription generation. See
+[MEDILOCKER_STRUCTURE.md](../medilocker_lambda/docs/MEDILOCKER_STRUCTURE.md) and
+[FETCH_FILES_ENDPOINT.md](../medilocker_lambda/docs/FETCH_FILES_ENDPOINT.md) for details.

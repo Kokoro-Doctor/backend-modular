@@ -1,4 +1,24 @@
+# Build artifacts
 .aws-sam
+__pycache__/
+.venv/
 .DS_Store
+
+# Secrets — never commit
+#
+# The real template.yaml carries live credentials inline (Razorpay, OpenAI, Groq,
+# Brevo, ABDM, JWT and admin keys), so it is deliberately NOT committed. The
+# committable, parameterised equivalent is template.example.yaml — keep it in
+# sync whenever you add or rename a Lambda, table or environment variable.
+# See docs/HANDOVER.md and docs/DEPLOYMENT.md.
 template.yaml
-scripts/
+.env
+*.env
+meet-test/credentials.json
+
+# Real doctor/patient data used by the one-off import scripts.
+# doctors_with_reviews.xlsx contains names, phone numbers, emails and a
+# plaintext `password` column for 21 real doctors — never commit these.
+# See docs/SCRIPTS.md for the expected column layout.
+scripts/**/*.xlsx
+scripts/**/*.csv

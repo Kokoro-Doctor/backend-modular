@@ -243,6 +243,6 @@ Doctor                    System                     Hospital
 ## 9. Related Docs
 
 - [DR_USER_CONNECTION_FLOW.md](./DR_USER_CONNECTION_FLOW.md) – Doctor–user subscription flow
-- [HOSPITAL_RAW_INGESTION.md](../backend/medilocker_lambda/docs/HOSPITAL_RAW_INGESTION.md) – Current hospital upload API
+- [docs_api/medilocker-lambda.md](./docs_api/medilocker-lambda.md) – Current hospital upload API (`/hospital/*` raw ingestion)
 - [LAMBDA_FUNCTIONS.md](./LAMBDA_FUNCTIONS.md) – API endpoints overview
 - [DATABASE_TABLES.md](./DATABASE_TABLES.md) – Database schema overview
