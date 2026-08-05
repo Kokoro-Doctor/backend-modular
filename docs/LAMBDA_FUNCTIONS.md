@@ -1,5 +1,25 @@
 # Lambda Functions Overview
 
+> **Verified against the routers on 5 August 2026.** When you add or change a
+> route, update this file and the matching example file in
+> [docs_api/](docs_api/README.md).
+
+All eleven deployable functions, their base paths and their routes.
+
+| Function | Base path | Section |
+|---|---|---|
+| `AuthLambda` | `/auth` | [Auth](#authlambda-auth) |
+| `UserServiceLambda` | `/users` | [User](#userservicelambda-users) |
+| `HospitalsLambda` | `/hospitals` | [Hospitals](#hospitalslambda-hospitals) |
+| `DoctorsServiceLambda` | `/doctorsService` | [Doctors](#doctorsservicelambda-doctorsservice) |
+| `BookingLambda` | `/booking` | [Booking](#bookinglambda-booking) |
+| `ProcessPaymentLambda` | `/process-payment` | [Payments](#processpaymentlambda-process-payment) |
+| `DoctorPayoutsLambda` | `/payouts` | [Payouts](#doctorpayoutslambda-payouts) |
+| `MediLockerLambda` | `/medilocker`, `/hospital` | [Medilocker](#medilockerlambda-medilocker-and-hospital) |
+| `OCRWorkerLambda` | *(SQS-triggered)* | [OCR Worker](#ocrworkerlambda-sqs-triggered) |
+| `ChatLambda` | `/chat` | [Chat](#chatlambda-chat) |
+| `ABHALambda` | `/abha`, `/api/v3` | [ABHA / ABDM](#abhalambda-abha-and-apiv3) |
+
 ## Authentication & User Management
 
 ### AuthLambda (`/auth`)
@@ -26,6 +46,12 @@ User/doctor signup, login, OAuth, password reset, OTP verification, account dele
   - Body: `{}`
 - `POST /auth/admin/delete-account` - Delete user/doctor/hospital account data (admin only)
   - Body: `{ "phoneNumber": "string" }`, `{ "hospital_id": "string" }`, or both
+  - Header: `x-admin-key`
+- `POST /auth/abha/signup-user` - Create a Kokoro user from a verified ABHA identity
+  - Router: `auth_abha.py` (prefix `/auth/abha`). Links the ABHA record to a hospital via `UserHospital`
+
+> `POST /auth/google` is defined in `auth_google.py` but is **commented out** in
+> the router and is therefore not currently served.
 
 ### UserServiceLambda (`/users`)
 
@@ -59,6 +85,16 @@ Hospital CRUD, login, staff workflows, and user-doctor relation views.
 - `GET /hospitals/{hospital_id}/doctors` - List hospital doctors with patient counts
 - `GET /hospitals/{hospital_id}/relations` - List doctor-patient assignments for hospital
 - `POST /hospitals/relations` - Create/reactivate user-doctor relation
+- `POST /hospitals/signup` - Self-service hospital registration
+
+**Hospital Staff Endpoints** (prefix `/hospitals/staff`, all require `Authorization: Bearer` from `POST /hospitals/login`; `hospital_id` is derived from the token):
+
+- `POST /hospitals/staff/add-patient` - Register a patient (`multipart/form-data`, three mandatory file fields)
+- `POST /hospitals/staff/update_patient` - Update an existing patient record
+- `GET /hospitals/staff/patients/{user_id}/documents` - List a patient's documents
+- `POST /hospitals/staff/patients/{user_id}/documents` - Upload a document for a patient
+- `GET /hospitals/staff/documents` - List documents across the hospital
+- `POST /hospitals/staff/add-doctor` - Add a doctor to the hospital (requires matching `hospital_id`)
 
 ### DoctorsServiceLambda (`/doctorsService`)
 
@@ -74,6 +110,8 @@ Doctor profile updates, document uploads, doctor listings, availability slot man
   - Body: `{ "doctor_id": "string", "date": "YYYY-MM-DD", "slots": [{ "start": "HH:MM", "end": "HH:MM" }] }`
 - `POST /doctorsService/updateSlot` - Toggle availability for a single slot
   - Body: `{ "doctor_id": "string", "date": "YYYY-MM-DD", "slot_time": "HH:MM", "available": true }`
+- `GET /doctorsService/doctor/{doctor_id}` - Fetch a single doctor by ID
+- `DELETE /doctorsService/doctors/{doctor_id}/slots` - Delete availability slots for a doctor
 
 ## Appointments & Subscriptions
 
@@ -119,6 +157,8 @@ Appointment booking/cancellation, availability queries, subscription plans and u
   - Body: `{ "subscription_id": "string", "user_id": "string", "doctor_id": "string" }`
 - `POST /booking/subscriptions/{subscription_id}/cancel` - Cancel a subscription
   - Query: `?user_id=string` (required)
+- `POST /booking/admin/test-subscription` - Create a subscription without payment verification (admin only, for testing)
+  - Header: `x-admin-key`
 
 ## Payments
 
@@ -172,6 +212,25 @@ Encrypted medical file upload/download/delete, AI-generated prescription creatio
 - `POST /medilocker/prescription` - Extract prescription from uploaded files using AI (GPT Vision)
   - Body: `{ "files": [{ "filename": "string", "content": "base64_string" }], "frontend_patient_details": {} }`
 
+**Insurance & Discharge Endpoints:**
+
+- `POST /medilocker/insurance/analyze` - OCR + structured extraction + claim analysis for an insurance document
+  - Form: multipart `file` only. Stateless — no DynamoDB persistence
+- `POST /medilocker/insurance/analyze/stream` - Streaming variant of the above
+- `POST /medilocker/insurance/preauth/analyze` - Pre-authorisation analysis (see [PREAUTH_SERVICE_ARCHITECTURE.md](PREAUTH_SERVICE_ARCHITECTURE.md))
+- `POST /medilocker/discharge/analyze` - Extract structured data from a discharge summary
+  - Form: multipart `file` only. Stateless
+- `POST /medilocker/users/{user_id}/insurance/autofill-stored` - Autofill an insurance form from the user's stored documents
+
+**Async OCR Endpoints:**
+
+- `POST /medilocker/upload/async` - Upload and enqueue for background OCR (returns `202`; processed by `OCRWorkerLambda`)
+- `GET /medilocker/users/{user_id}/files/{file_id}/status` - Poll async OCR status
+
+> Use the async pair for large documents. API Gateway times out at 29 seconds
+> regardless of this function's 120-second Lambda timeout — see
+> [DEPLOYMENT.md](DEPLOYMENT.md).
+
 **Hospital Raw Data Endpoints** (auth: `x-hospital-api-key` header):
 
 - `POST /hospital/upload` - Direct API upload (multipart/form-data)
@@ -181,6 +240,27 @@ Encrypted medical file upload/download/delete, AI-generated prescription creatio
 - `POST /hospital/confirm-upload` - Confirm presigned uploads completed (saves metadata to DynamoDB)
   - Body: `{ "hospital_id": "string", "patient_id": "string", "files": [{ "file_id": "string", "filename": "string", "file_size": number }] }`
 
+## OCR Processing
+
+### OCRWorkerLambda (SQS-triggered)
+
+Background OCR worker. **Not HTTP-facing** — it has no routes and is not exposed
+through API Gateway.
+
+- **Trigger:** SQS `OCRQueue`, `BatchSize: 1` (one document per invocation)
+- **Entrypoint:** `app/handler.py` (not `app/main.py` like the others)
+- **Producers:** `MediLockerLambda` and `HospitalsLambda` enqueue via `OCR_QUEUE_URL`
+- **Message shape:** `{ "user_id", "file_id", "s3_key", "filename", "created_at" }`
+- **Failure handling:** redelivered up to `maxReceiveCount: 3`, then routed to
+  `OCRQueueDLQ` (14-day retention)
+- **Writes to:** `MedilockerDocuments`
+
+Uses AWS Textract through the shared `ocr-core` Lambda layer (`ocr_layer/`).
+See [OCR_IMPLEMENTATION.md](OCR_IMPLEMENTATION.md),
+[AWS_TEXTRACT_USAGE.md](AWS_TEXTRACT_USAGE.md), and
+[OPERATIONS_RUNBOOK.md](OPERATIONS_RUNBOOK.md) for the "OCR jobs never complete"
+triage path.
+
 ## Chat
 
 ### ChatLambda (`/chat`)
@@ -189,5 +269,70 @@ AI-powered chat assistant with RAG (Retrieval Augmented Generation) fallback to 
 
 **Endpoints:**
 
-- `POST /chat` - Send chat message and get AI response
-  - Body: `{ "user_id": "string", "session_id": "string", "doctor_id": "string", "message": "string", "language": "en" }`
+- `POST /chat/send` - Send chat message and get AI response
+  - Body: `{ "user_id": "string", "session_id": "string", "doctor_id": "string", "message": "string", "language": "en", "role": "patient" }`
+  - `role` is optional and defaults to `patient`. Anonymous users get a `chat_count` in the response
+- `GET /chat/history/user` - Fetch chat history for one user
+  - Query: `?identifier=&date=&start_date=&end_date=&limit=`
+- `GET /chat/history/global` - Fetch chat history across all users
+  - Query: `?date=&start_date=&end_date=&days=&limit=`
+
+Flow detail: [../chat_lambda/CHAT_LAMBDA_FLOW.md](../chat_lambda/CHAT_LAMBDA_FLOW.md).
+
+## ABDM / ABHA
+
+### ABHALambda (`/abha` and `/api/v3`)
+
+India's Ayushman Bharat Digital Mission integration — ABHA identity, plus health
+record exchange as both HIP (sharing) and HIU (consuming).
+
+**Read [ABDM_INTEGRATION.md](ABDM_INTEGRATION.md) before changing anything here.**
+Every flow is asynchronous and correlated by `request_id`.
+
+**ABHA identity — Milestone 1** (`/abha`):
+
+- `POST /abha/create/request-otp` · `POST /abha/create/verify-otp` - Create ABHA via Aadhaar
+- `POST /abha/create/mobile/request-otp` · `POST /abha/create/mobile/verify-otp` - Create ABHA via mobile
+- `POST /abha/login/request-otp` · `POST /abha/login/verify-otp` - Login via Aadhaar/ABHA number
+- `POST /abha/login/mobile/request-otp` · `POST /abha/login/mobile/verify-otp` · `POST /abha/login/mobile/verify-user` - Login via mobile
+- `GET /abha/profile` - ABHA profile (requires Kokoro JWT)
+- `GET /abha/card` - ABHA card, returns `card_base64` (requires Kokoro JWT)
+
+> ABDM tokens are stored in `AbhaAccounts` and resolved server-side — clients
+> never send an ABHA token.
+
+**HIP linking and bridge admin — Milestone 2** (`/abha`, all require Kokoro JWT):
+
+- `POST /abha/link/generate-token` - Generate a link token (returns `request_id`)
+- `POST /abha/link/care-context` - Link a care context (returns `request_id`)
+- `PATCH /abha/bridge/url` - Update the registered bridge callback URL
+- `POST /abha/bridge/register-facility` - Register a facility (also sets `hiu_id`)
+- `POST /abha/bridge/link-hospital` - Link a hospital to the bridge
+- `GET /abha/bridge/find-bridge` · `GET /abha/bridge/services` · `GET /abha/bridge/hospitals` - Bridge inspection
+- `GET /abha/transactions` - Inspect `AbdmTransactions` for `request_id` correlation
+
+**HIU — Milestone 3** (`/abha/hiu`):
+
+- `POST /abha/hiu/consent/request` - Request consent from a remote provider
+- `GET /abha/hiu/consent/request/{request_id}` - Inspect a consent request
+- `POST /abha/hiu/consent/status` · `POST /abha/hiu/consent/fetch` - Consent status and artefact fetch
+- `POST /abha/hiu/health-information/request` - Request health records
+- `GET /abha/hiu/data/{request_id}` - Retrieve received data
+
+**Inbound ABDM callbacks** (`/api/v3`) — called by the ABDM gateway, not by clients. All return `202`:
+
+- `POST /api/v3/hip/token/on-generate-token`
+- `POST /api/v3/link/on_carecontext`
+- `POST /api/v3/consent/request/hip/notify`
+- `POST /api/v3/hip/health-information/request`
+- `POST /api/v3/hiu/consent/request/on-init`
+- `POST /api/v3/hiu/consent/request/notify`
+- `POST /api/v3/hiu/consent/request/on-status`
+- `POST /api/v3/hiu/consent/on-fetch`
+- `POST /api/v3/hiu/health-information/transfer`
+
+> ⚠️ These callbacks are **currently unauthenticated** and orchestrate
+> synchronously inside a 30-second Lambda. See
+> [ABDM_INTEGRATION.md](ABDM_INTEGRATION.md) §3.
+
+Request/response examples: [docs_api/abha-lambda.md](docs_api/abha-lambda.md).

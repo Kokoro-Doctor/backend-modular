@@ -1,3 +1,13 @@
+# ABDM Milestone 2 — consent and data-flow diagram
+
+End-to-end view of the HIP data-sharing flow: hospital registration, patient
+consent via the ABHA app, and the encrypted FHIR transfer back through the ABDM
+gateway.
+
+> Narrative, current status and known gaps: [ABDM_INTEGRATION.md](ABDM_INTEGRATION.md).
+> Note that step 7 (encrypted FHIR data) is wired end to end but currently
+> carries an **empty placeholder bundle** — see §2, Milestone 2.
+
 ```mermaid
 flowchart LR
 

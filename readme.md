@@ -11,6 +11,25 @@ Built using **FastAPI**, **AWS Lambda**, **DynamoDB**, **S3**, and **API Gateway
 
 ---
 
+## 📚 Documentation
+
+**Start here → [docs/README.md](docs/README.md)** — the full documentation index.
+
+| If you are… | Read |
+| ----------- | ---- |
+| New to the codebase | [docs/ONBOARDING.md](docs/ONBOARDING.md) |
+| Taking over the project | [docs/HANDOVER.md](docs/HANDOVER.md) |
+| Deploying | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) |
+| Debugging production | [docs/OPERATIONS_RUNBOOK.md](docs/OPERATIONS_RUNBOOK.md) |
+| Looking for an endpoint | [docs/LAMBDA_FUNCTIONS.md](docs/LAMBDA_FUNCTIONS.md) |
+
+> ⚠️ **New maintainers:** the real `template.yaml` is **not** in this repository —
+> it contains live credentials and is gitignored. Deploy from the sanitised
+> [`template.example.yaml`](template.example.yaml). See
+> [docs/HANDOVER.md](docs/HANDOVER.md) §2 before your first deploy.
+
+---
+
 ## 🌐 Live Domain
 
 **Frontend & API Gateway**: [https://kokoro.doctor](https://kokoro.doctor)
@@ -37,10 +56,12 @@ SAM and docs live at the `backend/` root; each deployable unit is a `*_lambda` f
 
 ```
 backend/
-├── readme.md              # This file — endpoints, env vars, tables
-├── template.yaml          # AWS SAM: Lambdas, API Gateway, IAM, resources
+├── readme.md              # This file — overview and entry points
+├── docs/                  # All documentation — start at docs/README.md
+├── template.example.yaml  # AWS SAM (sanitised, committed) — deploy from this
+├── template.yaml          # Real SAM template — gitignored, holds live secrets
 ├── samconfig.toml         # SAM CLI deploy defaults (stack, region, …)
-├── scripts/               # Operational / deploy helpers
+├── scripts/               # Operational / deploy helpers (see docs/SCRIPTS.md)
 ├── medilocker_lambda/
 │   ├── requirements.txt
 │   ├── docs/
@@ -112,59 +133,79 @@ Base path: `/doctorsService`
 
 > **Note:** Subscriptions are managed via the Booking Lambda (`/booking/subscriptions`) and are created automatically after successful payment. See Subscription System documentation.
 
-### 3. Appointment Service (`appointmentService_lambda`)
+### 3. Booking Service (`booking_lambda`)
 
-Base path: `/appointmentService`
+Base path: `/booking`
 
-- `POST /appointmentService/bookings` – Book a slot atomically (enforces capacity & unique reservations via DynamoDB)
-- `DELETE /appointmentService/bookings/{booking_id}` – Cancel an existing booking and free the slot
-- `GET /appointmentService/doctors/{doctor_id}/availability?date=YYYY-MM-DD` – List available slots for a doctor on a specific date
-- `GET /appointmentService/doctors/{doctor_id}/bookings?date=YYYY-MM-DD` – Fetch bookings for a doctor
-- `GET /appointmentService/users/{user_id}/bookings?type=upcoming|past` – Fetch bookings for a user
-- `GET /appointmentService/doctors/{doctor_id}/calendar?days=N` – Get unified calendar for a doctor
+- `POST /booking/bookings` – Book a slot atomically (enforces capacity & unique reservations via DynamoDB)
+- `DELETE /booking/bookings/{booking_id}` – Cancel an existing booking and free the slot
+- `GET /booking/doctors/{doctor_id}/availability?date=YYYY-MM-DD` – List available slots for a doctor on a specific date
+- `GET /booking/doctors/{doctor_id}/bookings?date=YYYY-MM-DD` – Fetch bookings for a doctor
+- `GET /booking/users/{user_id}/bookings?type=upcoming|past` – Fetch bookings for a user
+- `GET /booking/doctors/{doctor_id}/calendar?days=N` – Get unified calendar for a doctor
+
+This service also owns subscription plans and user subscriptions (`/booking/plans`,
+`/booking/subscriptions`). Full route list: [docs/LAMBDA_FUNCTIONS.md](docs/LAMBDA_FUNCTIONS.md).
 
 > ⏱️ Slots are 30 minutes, bookable up to 15 days ahead, capped at five patients per slot.
 
 ### 4. Medilocker Service (`medilocker_lambda`)
 
-Base path: `/medilocker`
+Base paths: `/medilocker`, `/hospital`
 
-- `POST /medilocker/upload` – Upload one or more encrypted medical files to S3
-- `POST /medilocker/fetch` – List stored files with metadata and signed download links
-- `POST /medilocker/download` – Generate a single-file pre-signed download URL
-- `POST /medilocker/delete` – Remove a stored file
-- `POST /medilocker/generate-prescription` – Summarise selected documents and symptoms into an AI-generated prescription
+- `POST /medilocker/upload` – Upload one or more medical files to S3
+- `GET /medilocker/users/{user_id}/files` – List stored files (optional `?category=`)
+- `GET /medilocker/users/{user_id}/files/{file_id}/download` – Pre-signed download URL
+- `DELETE /medilocker/users/{user_id}/files/{file_id}` – Remove a stored file
+- `POST /medilocker/users/{user_id}/prescription` – AI-generated prescription from stored documents
+- `POST /medilocker/insurance/analyze`, `POST /medilocker/discharge/analyze` – OCR + LLM document analysis
+- `POST /medilocker/upload/async` – Enqueue for background OCR (`OCRWorkerLambda`)
+
+Also hosts the `/hospital/*` raw-ingestion routes (auth: `x-hospital-api-key`).
 
 ### 5. Chat Service (`chat_lambda`)
 
 Base path: `/chat`
 
-- `POST /chat` – Send a user or session message; attempts RAG answer first, falls back to LLM, persists transcript
+- `POST /chat/send` – Send a user or session message; attempts RAG answer first, falls back to LLM, persists transcript
+- `GET /chat/history/user`, `GET /chat/history/global` – Chat history queries
 
-### 6. Payment Lambda (`payment`)
+### 6. Payment Lambda (`payment_lambda`)
 
-- `POST /payment` (API Gateway integration target)
-  - With `{ "amount": 999 }` → Creates a Razorpay payment link and returns `short_url`
-  - With `{ "payment_id": "pay_..." }` → Verifies payment, stores record in DynamoDB, and returns invoice link (when captured)
+Base path: `/process-payment`
 
-> The function also responds to CORS `OPTIONS` requests automatically.
+- `POST /process-payment/payment-link` – Create a Razorpay payment link for a subscription plan
+  - Body: `{ "plan_id": "string", "user_id": "string", "doctor_id": "string" }`
+- `POST /process-payment/webhook` – Razorpay webhook handler; on success creates the subscription and writes a `DoctorEarningsLedger` entry
+
+### 7. Other services
+
+`userService_lambda` (`/users`), `doctorsService_lambda` (`/doctorsService`),
+`hospitals_lambda` (`/hospitals`), `doctor_payouts_lambda` (`/payouts`),
+`abha_lambda` (`/abha`, `/api/v3`) and the SQS-triggered `ocr_worker_lambda`.
+
+**Full, verified route list for all eleven services:
+[docs/LAMBDA_FUNCTIONS.md](docs/LAMBDA_FUNCTIONS.md).**
 
 ---
 
 ## ⚙️ Environment Configuration
 
-Set the following variables for each Lambda before deployment (SAM templates wire them in production; required for local runs or tests):
+Each Lambda reads its configuration from environment variables via its own
+`app/config.py`. In production these are set by the SAM template; for local runs
+each service needs its own (gitignored) `.env`.
 
-- **Auth Service**: `USERS_TABLE`, `DOCTORS_TABLE`, `AUTH_TOKENS_TABLE`, `SESSIONS_TABLE` (optional), `BREVO_SMTP_USER`, `BREVO_SMTP_KEY`, `BREVO_SMTP_SERVER`, `BREVO_SMTP_PORT`, `SMS_AWS_REGION` (default `ap-south-1`), `SMS_COUNTRY_CODE` (default `+91`). Optional rate-limit overrides: `EMAIL_VERIFICATION_RATE_LIMIT_MAX_ATTEMPTS`, `EMAIL_VERIFICATION_RATE_LIMIT_WINDOW_SECONDS`, `MOBILE_OTP_RATE_LIMIT_MAX_ATTEMPTS`, `MOBILE_OTP_RATE_LIMIT_WINDOW_SECONDS`, `PASSWORD_RESET_EMAIL_RATE_LIMIT_MAX_ATTEMPTS`, `PASSWORD_RESET_EMAIL_RATE_LIMIT_WINDOW_SECONDS`, `PASSWORD_RESET_SMS_RATE_LIMIT_MAX_ATTEMPTS`, `PASSWORD_RESET_SMS_RATE_LIMIT_WINDOW_SECONDS`.
-- **Doctor Service**: `DOCTORS_TABLE`, `USERS_TABLE`, `S3_BUCKET` (default `kokoro-doctor`, uses `DoctorDocuments/` folder)
-- **Booking Service**: `AWS_REGION` (default `ap-south-1`)
-- **Medilocker Service**: `S3_BUCKET` (default `kokoro-doctor`, uses `Medilocker/` folder), `OPENAI_API_KEY`
-- **Chat Service**: `DYNAMODB_TABLE`, `OPENAI_API_KEY`, `RAG_SERVER_URL`
-- **Payment Lambda**: `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `DYNAMODB_TABLE_NAME`
+**Complete per-service inventory, including which values are secrets and which
+must match across services: [docs/ENVIRONMENT_VARIABLES.md](docs/ENVIRONMENT_VARIABLES.md).**
+
+> `JWT_SECRET` must be identical in `auth_lambda`, `abha_lambda` and
+> `hospitals_lambda`, or tokens issued by one will not validate in the others.
 
 ---
 
 ## 🗃️ DynamoDB Tables
+
+26 tables in total. The main ones:
 
 | Table                     | Purpose                                                                   |
 | ------------------------- | ------------------------------------------------------------------------- |
@@ -174,6 +215,13 @@ Set the following variables for each Lambda before deployment (SAM templates wir
 | `AppointmentsTable`       | Stores user bookings (PK/SK + GSI)                                        |
 | `ChatHistory`             | Stores user chat logs with timestamps                                     |
 | `PaymentsTable`           | Stores Razorpay payment info                                              |
+| `MedilockerDocuments`     | Medical document metadata (S3 objects + OCR results)                      |
+| `Hospitals`, `UserHospital`, `DoctorHospital`, `UserDoctor` | Hospital accounts and the patient/doctor/hospital relation junctions |
+| `SubscriptionPlans`, `UserDoctorSubscriptions` | Subscription plans and entitlements                    |
+| `DoctorEarningsLedger`, `DoctorPayoutsTable` | Doctor earnings and payouts                              |
+| `AbhaAccounts`, `HospitalAbdmConfig`, `AbdmTransactions`, `ConsentArtefacts`, `HiuConsentRequests`, `HiuDataRequests` | ABDM / ABHA integration |
+
+**Full schemas, keys and GSIs for all 26: [docs/DATABASE_TABLES.md](docs/DATABASE_TABLES.md).**
 
 ### 🧠 Bookings Table Schema
 
@@ -208,9 +256,16 @@ Set the following variables for each Lambda before deployment (SAM templates wir
 
 ## 🚀 Deployment (AWS SAM)
 
-### Build
+Stack `sam-app` in `ap-south-1`, API Gateway stage `prod`.
 
 ```bash
-sam build
-sam deploy --capabilities CAPABILITY_NAMED_IAM
+sam build --template template.example.yaml
 ```
+
+```bash
+sam deploy --template template.example.yaml --capabilities CAPABILITY_NAMED_IAM
+```
+
+Secrets are CloudFormation parameters and must be supplied at deploy time.
+**Read [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) first** — there is no staging
+environment, and every deploy goes to production.

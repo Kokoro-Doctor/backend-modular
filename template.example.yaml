@@ -1,0 +1,1776 @@
+# ---------------------------------------------------------------------------
+# SANITIZED EXAMPLE TEMPLATE — safe to commit.
+#
+# Generated from the real template.yaml, which is gitignored because it had
+# live credentials inline. Every secret here is a CloudFormation Parameter.
+# Supply real values at deploy time via samconfig.toml parameter_overrides or
+# `sam deploy --parameter-overrides`; never commit real values back into this file.
+#
+# See docs/DEPLOYMENT.md and docs/ENVIRONMENT_VARIABLES.md.
+# ---------------------------------------------------------------------------
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: "AWS::Serverless-2016-10-31"
+Description: SAM Template for API Gateway and Lambda Functions.
+
+Parameters:
+  BrevoSmtpUser:
+    Type: String
+    Description: 'Brevo SMTP login (transactional email).'
+    Default: "your-user@smtp-brevo.com"
+
+  BrevoSmtpKey:
+    Type: String
+    Description: 'Brevo SMTP API key. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  JwtSecret:
+    Type: String
+    Description: 'HMAC signing key for Kokoro JWTs. Must be IDENTICAL across AuthLambda, ABHALambda and HospitalsLambda or tokens fail to validate. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  AuthAdminKey:
+    Type: String
+    Description: 'x-admin-key for POST /auth/admin/delete-account. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  BookingAdminKey:
+    Type: String
+    Description: 'x-admin-key for POST /booking/admin/test-subscription. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  OpenAiApiKey:
+    Type: String
+    Description: 'OpenAI API key (chat_lambda). SECRET.'
+    NoEcho: true
+    Default: ""
+
+  GroqApiKeyChat:
+    Type: String
+    Description: 'Groq API key used by chat_lambda. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  GroqApiKeyMedilocker:
+    Type: String
+    Description: 'Groq API key used by medilocker_lambda. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  RazorpayKeyId:
+    Type: String
+    Description: 'Razorpay key id. Use a rzp_test_ key for non-prod.'
+    Default: "rzp_test_xxxxxxxxxxxx"
+
+  RazorpayKeySecret:
+    Type: String
+    Description: 'Razorpay key secret. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  RazorpayWebhookSecret:
+    Type: String
+    Description: 'Shared secret used to verify Razorpay webhook signatures. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  HospitalApiKey:
+    Type: String
+    Description: 'x-hospital-api-key for /hospital/* raw ingestion routes. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  AbdmClientId:
+    Type: String
+    Description: 'ABDM client id issued in the ABDM sandbox/prod portal.'
+    Default: "SBXID_XXXXXX"
+
+  AbdmClientSecret:
+    Type: String
+    Description: 'ABDM client secret. SECRET.'
+    NoEcho: true
+    Default: ""
+
+  AbdmGatewayBaseUrl:
+    Type: String
+    Description: 'ABDM gateway base URL. Sandbox: https://dev.abdm.gov.in'
+    Default: "https://dev.abdm.gov.in"
+
+  AbdmAbhaBaseUrl:
+    Type: String
+    Description: 'ABHA service base URL. Sandbox: https://abhasbx.abdm.gov.in'
+    Default: "https://abhasbx.abdm.gov.in"
+
+  AbdmXCmId:
+    Type: String
+    Description: 'ABDM consent-manager id. Sandbox: sbx, production: abdm'
+    Default: "sbx"
+
+  KokoroWebhookBaseUrl:
+    Type: String
+    Description: 'Public API Gateway base URL ABDM calls back on. Must be reachable from the ABDM gateway.'
+    Default: "https://REPLACE.execute-api.ap-south-1.amazonaws.com/prod"
+
+  RagServerUrl:
+    Type: String
+    Description: 'RAG server endpoint used by chat_lambda.'
+    Default: "http://REPLACE:8000/rag"
+
+  OllamaApi:
+    Type: String
+    Description: 'Ollama endpoint (chat_lambda).'
+    Default: "https://kokoro.doctor/ollama"
+
+  AdminEmail:
+    Type: String
+    Description: 'Recipient for payment/ops notification email.'
+    Default: "business.support@kokoro.doctor"
+
+Resources:
+  #============================== DynamoDB Tables ======================================
+  ## Users Table
+  UsersTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Users
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: phoneNumber
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: phone-index
+          KeySchema:
+            - AttributeName: phoneNumber
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  ## Doctors Table
+  DoctorsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Doctors
+      AttributeDefinitions:
+        - AttributeName: doctor_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: phoneNumber
+          AttributeType: S
+      KeySchema:
+        - AttributeName: doctor_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: phone-index
+          KeySchema:
+            - AttributeName: phoneNumber
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  ## Auth Table (phone-first identity store)
+  AuthTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AuthTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: phoneNumber
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+      KeySchema:
+        - AttributeName: phoneNumber
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ## Verification Tokens Table
+  AuthTokensTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AuthTokensTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: token_id
+          AttributeType: S
+        - AttributeName: purpose
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: phoneNumber
+          AttributeType: S
+      KeySchema:
+        - AttributeName: token_id
+          KeyType: HASH
+        - AttributeName: purpose
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+            - AttributeName: purpose
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: phone-index
+          KeySchema:
+            - AttributeName: phoneNumber
+              KeyType: HASH
+            - AttributeName: purpose
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ## Sessions Table
+  SessionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: SessionsTable
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ## Doctor Availability Table
+  DoctorAvailabilityTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DoctorAvailabilityTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: expiry_timestamp
+        Enabled: true
+
+  ## Doctor Bookings Table
+  AppointmentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AppointmentsTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: booking_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_UserBookings
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: SK
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI_BookingId
+          KeySchema:
+            - AttributeName: booking_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      # TimeToLiveSpecification:
+      #   AttributeName: ttl
+      #   Enabled: true
+
+  ## Chat History Table
+  ChatHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ChatHistory
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S # Partition Key (String)
+        - AttributeName: timestamp
+          AttributeType: N # Sort Key (Number, for efficient sorting)
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: date_bucket
+          AttributeType: S # YYYY-MM-DD for global history queries
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH # Partition Key
+        - AttributeName: timestamp
+          KeyType: RANGE # Sort Key
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: date-timestamp-index
+          KeySchema:
+            - AttributeName: date_bucket
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  ## Payments Table
+  PaymentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: PaymentsTable
+      AttributeDefinitions:
+        - AttributeName: payment_id
+          AttributeType: S # String (Partition Key)
+      KeySchema:
+        - AttributeName: payment_id
+          KeyType: HASH # Partition Key
+      BillingMode: PAY_PER_REQUEST
+
+  ## Subscription Plans Table
+  SubscriptionPlansTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: SubscriptionPlans
+      AttributeDefinitions:
+        - AttributeName: plan_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: plan_id
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  ## User Doctor Subscriptions Table
+  UserDoctorSubscriptionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserDoctorSubscriptions
+      AttributeDefinitions:
+        - AttributeName: subscription_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: doctor_id
+          AttributeType: S
+        - AttributeName: payment_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: subscription_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_UserSubscriptions
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI_DoctorSubscribers
+          KeySchema:
+            - AttributeName: doctor_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI_PaymentSubscription
+          KeySchema:
+            - AttributeName: payment_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      BillingMode: PAY_PER_REQUEST
+
+  ## User Doctor Relations Table (persistent connectivity graph)
+  UserDoctorRelationsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserDoctorRelations
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: relation_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: doctor_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: relation_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_UserRelations
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: doctor_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: GSI_DoctorRelations
+          KeySchema:
+            - AttributeName: doctor_id
+              KeyType: HASH
+            - AttributeName: user_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ## User <-> Hospital membership (M:N). One row per (hospital, patient).
+  ## Query patients of a hospital via base table; hospitals of a user via GSI.
+  UserHospitalTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserHospital
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: hospital_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: hospital_id
+          KeyType: HASH
+        - AttributeName: user_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_UserHospitals
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: hospital_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ## Doctor <-> Hospital affiliation (M:N). One row per (hospital, doctor).
+  ## Query doctors of a hospital via base table; hospitals of a doctor via GSI.
+  DoctorHospitalTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DoctorHospital
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: hospital_id
+          AttributeType: S
+        - AttributeName: doctor_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: hospital_id
+          KeyType: HASH
+        - AttributeName: doctor_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_DoctorHospitals
+          KeySchema:
+            - AttributeName: doctor_id
+              KeyType: HASH
+            - AttributeName: hospital_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ## User <-> Doctor bond (M:N), hospital-independent. One row per (user, doctor).
+  ## Query doctors of a user via base table; patients of a doctor via GSI.
+  ## hospital_id (if any) rides as a non-key attribute, not part of identity.
+  UserDoctorTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UserDoctor
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: doctor_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: doctor_id
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_DoctorUsers
+          KeySchema:
+            - AttributeName: doctor_id
+              KeyType: HASH
+            - AttributeName: user_id
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ## Doctor Earnings Ledger Table (Immutable Financial Ledger)
+  DoctorEarningsLedgerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DoctorEarningsLedger
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: payment_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_PaymentEarnings
+          KeySchema:
+            - AttributeName: payment_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ## Doctor Payouts Table (Monthly Withdrawal Requests)
+  DoctorPayoutsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: DoctorPayoutsTable
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: payout_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: GSI_PayoutId
+          KeySchema:
+            - AttributeName: payout_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ## Hospitals Table (password-based auth; email and contact_number as login identifiers)
+  HospitalsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: Hospitals
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: hospital_id
+          AttributeType: S
+        - AttributeName: email
+          AttributeType: S
+        - AttributeName: contact_number
+          AttributeType: S
+      KeySchema:
+        - AttributeName: hospital_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: email-index
+          KeySchema:
+            - AttributeName: email
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: contact_number-index
+          KeySchema:
+            - AttributeName: contact_number
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  ## Hospital Raw Files Table (DEPRECATED — superseded by MedilockerDocuments
+  ## with source=HOSPITAL + hospital_id. Kept for existing data; no new writes.)
+  HospitalFilesTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: HospitalFiles
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: hospital_id
+          AttributeType: S
+        - AttributeName: file_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: hospital_id
+          KeyType: HASH
+        - AttributeName: file_id
+          KeyType: RANGE
+
+  ## Medilocker Documents Table
+  MedilockerDocumentsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: MedilockerDocuments
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+        - AttributeName: file_id
+          AttributeType: S
+        # hospital_id is present only on docs uploaded by a hospital
+        # (source=HOSPITAL). User-uploaded docs omit it, so hospital-index
+        # is sparse and contains only hospital-sourced documents.
+        - AttributeName: hospital_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: user_id
+          KeyType: HASH
+        - AttributeName: created_at
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: file_id-index
+          KeySchema:
+            - AttributeName: file_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        # Hospital dashboard: every doc a hospital uploaded, across all patients.
+        - IndexName: hospital-index
+          KeySchema:
+            - AttributeName: hospital_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  ## ABHA Accounts Table
+  AbhaAccountsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AbhaAccounts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: abha_number
+          AttributeType: S
+        - AttributeName: kokoro_user_id
+          AttributeType: S
+        - AttributeName: abha_address
+          AttributeType: S
+      KeySchema:
+        - AttributeName: abha_number
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: kokoro_user_id-index
+          KeySchema:
+            - AttributeName: kokoro_user_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: abha_address-index
+          KeySchema:
+            - AttributeName: abha_address
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  HospitalAbdmConfigTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: HospitalAbdmConfig
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: hospital_id
+          AttributeType: S
+        - AttributeName: hip_id
+          AttributeType: S
+        - AttributeName: hiu_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: hospital_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: hip_id-index
+          KeySchema:
+            - AttributeName: hip_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: hiu_id-index
+          KeySchema:
+            - AttributeName: hiu_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  AbdmTransactionsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: AbdmTransactions
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: hip_id
+          AttributeType: S
+        - AttributeName: abha_address
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: hip_id-index
+          KeySchema:
+            - AttributeName: hip_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: abha_address-index
+          KeySchema:
+            - AttributeName: abha_address
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ConsentArtefactsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ConsentArtefacts
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: consent_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: consent_id
+          KeyType: HASH
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ## Milestone 3 (HIU) — consent request lifecycle tracking
+  HiuConsentRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: HiuConsentRequests
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: consent_request_id
+          AttributeType: S
+        - AttributeName: hiu_id
+          AttributeType: S
+        - AttributeName: created_at
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: consent_request_id-index
+          KeySchema:
+            - AttributeName: consent_request_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+        - IndexName: hiu_id-index
+          KeySchema:
+            - AttributeName: hiu_id
+              KeyType: HASH
+            - AttributeName: created_at
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  ## Milestone 3 (HIU) — data-flow request state + ephemeral decryption keys
+  HiuDataRequestsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: HiuDataRequests
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: request_id
+          AttributeType: S
+        - AttributeName: transaction_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: request_id
+          KeyType: HASH
+      GlobalSecondaryIndexes:
+        - IndexName: transaction_id-index
+          KeySchema:
+            - AttributeName: transaction_id
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+
+  #============================== SQS — Async OCR Queue ====================================
+
+  OCRQueueDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: OCRQueueDLQ
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  OCRQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: OCRQueue
+      VisibilityTimeout: 300 # must be >= OCRWorkerLambda Timeout
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OCRQueueDLQ.Arn
+        maxReceiveCount: 3
+
+  #============================== Lambda Layer — ocr_layer (package ocr_core) ===============
+
+  OCRCoreLayer:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: ocr-core
+      Description: Shared Textract wrapper (pure OCR, no DynamoDB/LLM).
+      ContentUri: ./ocr_layer/
+      CompatibleRuntimes:
+        - python3.11
+    Metadata:
+      # Avoid python3.11 BuildMethod nesting python/python/ocr_core (breaks import ocr_core).
+      BuildMethod: makefile
+
+  #============================== IAM Role for Lambda ======================================
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: LambdaExecutionRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - dynamodb:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - execute-api:Invoke
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - s3:*
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - lambda:InvokeFunction
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  # Sync (images)
+                  - textract:AnalyzeDocument
+                  - textract:DetectDocumentText
+                  # Async (PDFs)
+                  - textract:StartDocumentAnalysis
+                  - textract:GetDocumentAnalysis
+                  - textract:StartDocumentTextDetection
+                  - textract:GetDocumentTextDetection
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  # MediLockerLambda: send OCR jobs to the queue
+                  # OCRWorkerLambda: receive, delete, and inspect queue messages
+                  - sqs:SendMessage
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                  - sqs:ChangeMessageVisibility
+                Resource:
+                  - !GetAtt OCRQueue.Arn
+                  - !GetAtt OCRQueueDLQ.Arn
+
+  #============================== Lambda Functions ======================================
+
+  AuthLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: AuthLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./auth_lambda/
+      Environment:
+        Variables:
+          USERS_TABLE: Users # DynamoDB table for user authentication
+          DOCTORS_TABLE: Doctors # DynamoDB table for doctor information
+          USER_HOSPITAL_TABLE: UserHospital # patient <-> hospital membership (ABHA signup links here)
+          DOCTOR_HOSPITAL_TABLE: DoctorHospital # doctor <-> hospital membership
+          HOSPITALS_TABLE: Hospitals # hospital accounts (admin deletion lookup)
+          USER_DOCTOR_TABLE: UserDoctor # patient <-> doctor unified relation junction
+          AUTH_TABLE: AuthTable # DynamoDB table for phone auth metadata
+          AUTH_TOKENS_TABLE: AuthTokensTable # DynamoDB table for storing verification tokens
+          SESSIONS_TABLE: SessionsTable # DynamoDB table for storing user sessions
+
+          BREVO_SMTP_USER: !Ref BrevoSmtpUser
+          BREVO_SMTP_KEY: !Ref BrevoSmtpKey
+          BREVO_SMTP_SERVER: smtp-relay.brevo.com
+          BREVO_SMTP_PORT: "587"
+
+          JWT_SECRET: !Ref JwtSecret
+          JWT_EXP_MINUTES: "1440"
+          JWT_ISSUER: "kokoro.doctor.auth"
+          ADMIN_KEY: !Ref AuthAdminKey
+          S3_BUCKET: "kokoro-doctor" # S3 bucket for file deletion
+          HOSPITAL_FILES_TABLE: HospitalFiles # legacy hospital-upload metadata
+          HOSPITAL_ABDM_TABLE: HospitalAbdmConfig
+          CONSENT_ARTEFACTS_TABLE: ConsentArtefacts
+          HIU_CONSENT_REQUESTS_TABLE: HiuConsentRequests
+          HIU_DATA_REQUESTS_TABLE: HiuDataRequests
+
+  UserServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: UserServiceLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./userService_lambda/
+      Environment:
+        Variables:
+          USERS_TABLE: "Users" # DynamoDB table for user information
+          DOCTORS_TABLE: "Doctors" # DynamoDB table for doctor information
+          AUTH_TABLE: "AuthTable" # DynamoDB table for auth metadata
+          AUTH_TOKENS_TABLE: "AuthTokensTable" # DynamoDB table for storing verification tokens
+          SESSIONS_TABLE: "SessionsTable" # DynamoDB table for storing user sessions
+
+  DoctorsServiceLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: DoctorsServiceLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30 # Increase timeout in seconds
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./doctorsService_lambda/
+      Environment:
+        Variables:
+          USERS_TABLE: "Users" # DynamoDB table for user information
+          DOCTORS_TABLE: "Doctors" # DynamoDB table for doctor information
+          DOCTOR_AVAILABILITY_TABLE: "DoctorAvailabilityTable" # DynamoDB table for doctor availability
+          HOSPITALS_TABLE: "Hospitals" # DynamoDB table for hospitals (doctor-hospital linking)
+          DOCTOR_HOSPITAL_TABLE: "DoctorHospital" # doctor <-> hospital affiliation junction (M:N)
+          S3_BUCKET: kokoro-doctor # S3 bucket for storing doctor documents (uses DoctorDocuments/ folder)
+
+  BookingLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: BookingLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./booking_lambda/
+      Environment:
+        Variables:
+          SUBSCRIPTION_PLANS_TABLE: "SubscriptionPlans"
+          USER_DOCTOR_SUBSCRIPTIONS_TABLE: "UserDoctorSubscriptions"
+          USER_DOCTOR_TABLE: "UserDoctor"
+          USER_DOCTOR_RELATIONS_TABLE: "UserDoctorRelations" # legacy; do not use for new relation writes
+          ADMIN_KEY: !Ref BookingAdminKey
+
+  ChatLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ChatLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30 # Increase timeout in seconds
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./chat_lambda/
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: "ChatHistory" #DynamoDB table use for chat history
+          OLLAMA_API: !Ref OllamaApi
+          RAG_SERVER_URL: !Ref RagServerUrl
+          OPENAI_API_KEY: !Ref OpenAiApiKey
+          GROQ_API_KEY: !Ref GroqApiKeyChat
+
+  ProcessPaymentLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ProcessPaymentLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./payment_lambda/
+      Environment:
+        Variables:
+          RAZORPAY_KEY_ID: !Ref RazorpayKeyId
+          RAZORPAY_KEY_SECRET: !Ref RazorpayKeySecret
+          RAZORPAY_WEBHOOK_SECRET: !Ref RazorpayWebhookSecret
+          DYNAMODB_TABLE_NAME: "PaymentsTable"
+          SUBSCRIPTION_PLANS_TABLE: "SubscriptionPlans"
+          USER_DOCTOR_SUBSCRIPTIONS_TABLE: "UserDoctorSubscriptions"
+          SUBSCRIPTION_SERVICE_LAMBDA_NAME: "BookingLambda"
+          DOCTOR_EARNINGS_LEDGER_TABLE: "DoctorEarningsLedger"
+          PLATFORM_FEE_PERCENTAGE: "20.0"
+          BREVO_SMTP_USER: !Ref BrevoSmtpUser
+          BREVO_SMTP_KEY: !Ref BrevoSmtpKey
+          BREVO_SMTP_SERVER: smtp-relay.brevo.com
+          BREVO_SMTP_PORT: "587"
+          ADMIN_EMAIL: !Ref AdminEmail
+
+  DoctorPayoutsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: DoctorPayoutsLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./doctor_payouts_lambda/
+      Environment:
+        Variables:
+          DOCTOR_PAYOUTS_TABLE: "DoctorPayoutsTable"
+          DOCTOR_EARNINGS_LEDGER_TABLE: "DoctorEarningsLedger"
+
+  ABHALambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: ABHALambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      # 512MB: the ABDM data-flow ECDH (app/abdm/fidelius.py) is pure-Python
+      # scalar multiplication, and Lambda scales CPU with memory. At 256MB a
+      # data-flow session costs ~1s of CPU; 512MB roughly halves that at
+      # near-identical cost, since duration halves too.
+      MemorySize: 512
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./abha_lambda/
+      Environment:
+        Variables:
+          ABHA_TABLE: "AbhaAccounts"
+          HOSPITAL_ABDM_TABLE: "HospitalAbdmConfig"
+          ABDM_TRANSACTIONS_TABLE: "AbdmTransactions"
+          ABDM_TRANSACTION_TTL_DAYS: "90"
+          CONSENT_ARTEFACTS_TABLE: "ConsentArtefacts"
+          HIU_CONSENT_REQUESTS_TABLE: "HiuConsentRequests"
+          HIU_DATA_REQUESTS_TABLE: "HiuDataRequests"
+          # Public base URL registered with ABDM (3.2.4). Also used to build the HIU
+          # dataPushUrl. MUST be set for M3 health-information requests to work.
+          KOKORO_WEBHOOK_BASE_URL: !Ref KokoroWebhookBaseUrl
+          ABDM_CLIENT_ID: !Ref AbdmClientId
+          ABDM_CLIENT_SECRET: !Ref AbdmClientSecret
+          ABDM_GATEWAY_BASE_URL: !Ref AbdmGatewayBaseUrl
+          ABDM_ABHA_BASE_URL: !Ref AbdmAbhaBaseUrl
+          ABDM_X_CM_ID: !Ref AbdmXCmId
+          JWT_SECRET: !Ref JwtSecret
+          JWT_ISSUER: "kokoro.doctor.auth"
+
+  HospitalsLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: HospitalsLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      MemorySize: 256
+      Timeout: 30
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./hospitals_lambda/
+      Environment:
+        Variables:
+          HOSPITALS_TABLE: "Hospitals"
+          USERS_TABLE: "Users"
+          DOCTORS_TABLE: "Doctors"
+          AUTH_TABLE: "AuthTable"
+          DOCTOR_AVAILABILITY_TABLE: "DoctorAvailabilityTable"
+          USER_HOSPITAL_TABLE: "UserHospital" # patient <-> hospital membership (M:N)
+          DOCTOR_HOSPITAL_TABLE: "DoctorHospital" # doctor <-> hospital affiliation (M:N)
+          USER_DOCTOR_TABLE: "UserDoctor" # patient <-> doctor bond (M:N)
+          S3_BUCKET: "kokoro-doctor"
+          JWT_SECRET: !Ref JwtSecret
+          JWT_EXPIRE_HOURS: "8"
+          DOCUMENTS_TABLE: "MedilockerDocuments"
+          OCR_QUEUE_URL: !Ref OCRQueue
+
+  MediLockerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: MediLockerLambda
+      Handler: app.main.handler
+      Runtime: python3.11
+      # Higher memory = more CPU; helps OCR/LLM-heavy /insurance/analyze stay under API limits
+      MemorySize: 1024
+      Timeout: 120
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./medilocker_lambda/
+      Layers:
+        - !Ref OCRCoreLayer
+      Environment:
+        Variables:
+          S3_BUCKET: kokoro-doctor # S3 bucket for storing medical files (uses Medilocker/ folder)
+          # OPENAI_API_KEY: sk-proj-REDACTED
+          GROQ_API_KEY: !Ref GroqApiKeyMedilocker
+          DOCUMENTS_TABLE: "MedilockerDocuments"
+          PRESCRIPTION_MAX_DOCS: "20"
+          HOSPITAL_FILES_TABLE: "HospitalFiles"
+          HOSPITAL_API_KEY: !Ref HospitalApiKey
+          OCR_QUEUE_URL: !Ref OCRQueue
+
+  OCRWorkerLambda:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: OCRWorkerLambda
+      Handler: app.handler.handler
+      Runtime: python3.11
+      # Memory for Textract polling; no CPU-heavy work
+      MemorySize: 512
+      # Must be <= SQS VisibilityTimeout (300). Textract PDF polling uses max_wait=270s.
+      Timeout: 300
+      Role: !GetAtt LambdaExecutionRole.Arn
+      CodeUri: ./ocr_worker_lambda/
+      Layers:
+        - !Ref OCRCoreLayer
+      Events:
+        OCRQueueTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OCRQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+      Environment:
+        Variables:
+          S3_BUCKET: kokoro-doctor
+          S3_FOLDER_PREFIX: "Medilocker/Users/"
+          DOCUMENTS_TABLE: "MedilockerDocuments"
+
+  #============================== API Gateway ======================================
+
+  ApiGateway:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: prod
+      BinaryMediaTypes:
+        - "multipart~1form-data"
+      DefinitionBody:
+        swagger: "2.0"
+        info:
+          title: KokoroServiceAPI
+        paths:
+          /auth/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${AuthLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /users/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UserServiceLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${UserServiceLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /doctorsService/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DoctorsServiceLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DoctorsServiceLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            delete:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DoctorsServiceLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /booking/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BookingLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BookingLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            put:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BookingLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            delete:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${BookingLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /chat/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ChatLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ChatLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /process-payment/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'POST, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Content-Type'"
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ProcessPaymentLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /hospitals/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type, x-admin-api-key'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HospitalsLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HospitalsLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            put:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${HospitalsLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /hospital/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type, x-hospital-api-key'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MediLockerLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MediLockerLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /medilocker/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MediLockerLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MediLockerLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            delete:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${MediLockerLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /payouts/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PUT, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DoctorPayoutsLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DoctorPayoutsLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            put:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${DoctorPayoutsLambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          /abha/{proxy+}:
+            options:
+              responses:
+                "200":
+                  description: CORS support
+                  headers:
+                    Access-Control-Allow-Origin:
+                      type: string
+                    Access-Control-Allow-Methods:
+                      type: string
+                    Access-Control-Allow-Headers:
+                      type: string
+              x-amazon-apigateway-integration:
+                type: mock
+                requestTemplates:
+                  application/json: '{ "statusCode": 200 }'
+                responses:
+                  default:
+                    statusCode: "200"
+                    responseParameters:
+                      method.response.header.Access-Control-Allow-Origin: "'*'"
+                      method.response.header.Access-Control-Allow-Methods: "'GET, POST, PATCH, PUT, DELETE, OPTIONS'"
+                      method.response.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+            get:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABHALambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABHALambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            patch:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABHALambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            put:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABHALambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+            delete:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABHALambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+          # ABDM HIE-CM async callbacks (HIP-initiated linking, M2+).
+          # ABDM POSTs to fixed paths under /api/v3/... → routed to ABHALambda
+          # (webhook_router). Server-to-server, no browser CORS needed.
+          /api/v3/{proxy+}:
+            post:
+              x-amazon-apigateway-integration:
+                uri: !Sub "arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ABHALambda.Arn}/invocations"
+                httpMethod: POST
+                type: aws_proxy
+
+        x-amazon-apigateway-gateway-responses:
+          DEFAULT_4XX:
+            responseParameters:
+              gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+              gatewayresponse.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+              gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+          DEFAULT_5XX:
+            responseParameters:
+              gatewayresponse.header.Access-Control-Allow-Origin: "'*'"
+              gatewayresponse.header.Access-Control-Allow-Methods: "'GET, POST, PUT, DELETE, OPTIONS'"
+              gatewayresponse.header.Access-Control-Allow-Headers: "'Authorization, Content-Type'"
+
+  #============================== Lambda Permissions ======================================
+
+  AuthLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref AuthLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/auth/*"
+
+  UserServiceLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref UserServiceLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/users/*"
+
+  DoctorsServiceLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DoctorsServiceLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/doctorsService/*"
+
+  BookingLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref BookingLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/booking/*"
+
+  ChatLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ChatLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/chat/*"
+
+  ProcessPaymentLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ProcessPaymentLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/process-payment/*"
+
+  MediLockerLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MediLockerLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/medilocker/*"
+
+  HospitalLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref MediLockerLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/hospital/*"
+
+  DoctorPayoutsLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref DoctorPayoutsLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/payouts/*"
+
+  HospitalsLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref HospitalsLambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/hospitals/*"
+
+  ABHALambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ABHALambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/abha/*"
+
+  # Allows API Gateway to invoke ABHALambda for ABDM async callbacks (/api/v3/...)
+  ABHAWebhookLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref ABHALambda
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub "arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway}/*/*/api/v3/*"
